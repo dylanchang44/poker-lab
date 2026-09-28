@@ -21,11 +21,11 @@ pub struct Profile {
     pub personality: Personality,
 }
 
-pub const MIRA: Profile = Profile {
+pub const ANANYA: Profile = Profile {
     id: "mira",
-    name: "Mira",
+    name: "Ananya",
     archetype: "The Analyst",
-    accent: [0.43, 0.65, 0.94],
+    accent: [0.86, 0.69, 0.36],
     personality: Personality {
         aggression: 0.68,
         selectivity: 0.74,
@@ -36,9 +36,9 @@ pub const MIRA: Profile = Profile {
         positional_awareness: 0.90,
     },
 };
-pub const JAX: Profile = Profile {
+pub const FREYA: Profile = Profile {
     id: "jax",
-    name: "Jax",
+    name: "Freya",
     archetype: "The Gambler",
     accent: [0.98, 0.54, 0.36],
     personality: Personality {
@@ -51,11 +51,11 @@ pub const JAX: Profile = Profile {
         positional_awareness: 0.50,
     },
 };
-pub const NOVA: Profile = Profile {
+pub const YUNA: Profile = Profile {
     id: "nova",
-    name: "Nova",
+    name: "Yuna",
     archetype: "The Observer",
-    accent: [0.52, 0.83, 0.68],
+    accent: [0.69, 0.60, 0.84],
     personality: Personality {
         aggression: 0.18,
         selectivity: 0.82,
@@ -82,7 +82,11 @@ pub const BASELINE: Profile = Profile {
         positional_awareness: 0.65,
     },
 };
-pub const PROFILES: [Profile; 4] = [BASELINE, MIRA, JAX, NOVA];
+// Stable IDs and aliases preserve Stage 2 strategy/seat compatibility.
+pub use ANANYA as MIRA;
+pub use FREYA as JAX;
+pub use YUNA as NOVA;
+pub const PROFILES: [Profile; 4] = [BASELINE, ANANYA, FREYA, YUNA];
 
 pub fn profile(seat: Seat) -> Profile {
     PROFILES[seat.index()]

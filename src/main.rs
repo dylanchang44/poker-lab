@@ -28,7 +28,7 @@ fn main() {
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Poker Lab".into(),
-                resolution: (1120, 860).into(),
+                resolution: (1280, 960).into(),
                 resize_constraints: bevy::window::WindowResizeConstraints {
                     min_width: 1000.0,
                     min_height: 820.0,

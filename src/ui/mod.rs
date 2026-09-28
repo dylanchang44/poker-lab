@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 
 use crate::game::AppState;
+pub mod characters;
 mod controls;
 mod table;
 
@@ -21,7 +22,11 @@ impl Plugin for UiPlugin {
         app.insert_resource(ClearColor(BACKGROUND))
             .init_resource::<crate::game::TableMode>()
             .init_resource::<crate::game::NpcSettings>()
-            .add_systems(Startup, setup_camera)
+            .init_resource::<characters::PortraitAssets>()
+            .init_resource::<characters::CharacterAnimation>()
+            .init_resource::<UiScale>()
+            .add_message::<characters::DialogueRequest>()
+            .add_systems(Startup, (setup_camera, characters::load))
             .add_systems(OnEnter(AppState::MainMenu), spawn_main_menu)
             .add_systems(OnExit(AppState::MainMenu), despawn_screen)
             .add_systems(OnEnter(AppState::InGame), crate::game::start_match)
@@ -32,15 +37,35 @@ impl Plugin for UiPlugin {
             .add_systems(Update, button_interactions)
             .add_systems(
                 Update,
+                characters::menu_portraits.run_if(in_state(AppState::MainMenu)),
+            )
+            .add_systems(PreUpdate, responsive_scale)
+            .add_systems(
+                Update,
                 (
                     controls::buttons,
                     controls::keyboard,
                     crate::game::npc_turn,
+                    characters::tick,
                     table::render,
+                    characters::sync_readouts,
+                    characters::animate,
+                    characters::dialogue,
                 )
                     .chain()
                     .run_if(in_state(AppState::InGame)),
             );
+    }
+}
+
+fn responsive_scale(windows: Query<&Window>, mut scale: ResMut<UiScale>) {
+    if let Ok(window) = windows.single() {
+        let target = (window.width() / 1200.0)
+            .min(window.height() / 960.0)
+            .clamp(0.5, 2.0);
+        if (scale.0 - target).abs() > 0.001 {
+            scale.0 = target;
+        }
     }
 }
 
@@ -75,14 +100,14 @@ fn spawn_main_menu(mut commands: Commands, mode: Res<crate::game::TableMode>) {
             label(
                 parent,
                 if *mode == crate::game::TableMode::Four {
-                    "Mira / Jax / Nova   -   1,000 chips each / 5-10 blinds"
+                    "Three minds. One table.   /   1,000 chips each / 5-10 blinds"
                 } else {
                     "Heads-up practice / 1,000 chips / 5-10 blinds"
                 },
                 19.0,
                 MUTED,
             );
-            table(parent, "YOUR TABLE AWAITS");
+            table(parent);
             button(parent, "Start Game", AppState::InGame);
         });
 }
@@ -98,13 +123,13 @@ fn label(parent: &mut ChildSpawnerCommands, value: impl Into<String>, size: f32,
     ));
 }
 
-fn table(parent: &mut ChildSpawnerCommands, message: &'static str) {
+fn table(parent: &mut ChildSpawnerCommands) {
     parent
         .spawn((
             Node {
                 width: Val::Percent(82.0),
-                max_width: Val::Px(680.0),
-                height: Val::Px(275.0),
+                max_width: Val::Px(800.0),
+                height: Val::Px(340.0),
                 align_items: AlignItems::Center,
                 justify_content: JustifyContent::Center,
                 margin: UiRect::vertical(Val::Px(22.0)),
@@ -115,7 +140,31 @@ fn table(parent: &mut ChildSpawnerCommands, message: &'static str) {
             BackgroundColor(FELT),
             BorderColor::all(FELT_EDGE),
         ))
-        .with_children(|table| label(table, message, 19.0, TEXT));
+        .with_children(|table| {
+            table.spawn(table::row(44.0)).with_children(|cast| {
+                for c in &poker_lab::characters::CAST {
+                    let p = poker_lab::npc::profiles::profile(c.seat);
+                    cast.spawn(table::column(8.0)).with_children(|person| {
+                        person.spawn((
+                            characters::MenuPortrait(c.seat),
+                            ImageNode::default(),
+                            Node {
+                                width: Val::Px(156.0),
+                                height: Val::Px(208.0),
+                                ..default()
+                            },
+                        ));
+                        label(
+                            person,
+                            p.name,
+                            21.0,
+                            Color::srgb(p.accent[0], p.accent[1], p.accent[2]),
+                        );
+                        label(person, p.archetype, 13.0, TEXT);
+                    });
+                }
+            });
+        });
 }
 
 fn button(parent: &mut ChildSpawnerCommands, text: &'static str, destination: AppState) {
@@ -225,7 +274,7 @@ mod tests {
     #[test]
     fn four_player_ui_background_turns_elimination_and_restart() {
         let mut app = test_app_mode(crate::game::TableMode::Four);
-        for name in ["Mira", "Jax", "Nova"] {
+        for name in ["Ananya", "Freya", "Yuna"] {
             assert!(
                 app.world_mut()
                     .query::<&Text>()
@@ -278,6 +327,51 @@ mod tests {
         press(&mut app, Control::Menu);
         app.update();
         assert!(!app.world().contains_resource::<GameSession>());
+    }
+
+    #[test]
+    fn portraits_persist_and_restart_clears_dialogue_and_old_requests() {
+        use poker_lab::characters::{CharacterExpression, DialogueLine};
+        let mut app = test_app_mode(crate::game::TableMode::Four);
+        let entities = app
+            .world_mut()
+            .query_filtered::<Entity, With<characters::PortraitFrame>>()
+            .iter(app.world())
+            .collect::<Vec<_>>();
+        assert_eq!(entities.len(), 3);
+        let epoch = app.world().resource::<GameSession>().presentation.session;
+        let old = DialogueLine {
+            session: epoch,
+            hand: 1,
+            speaker: Seat::Npc,
+            text: "Old hand".into(),
+            expression: Some(CharacterExpression::Happy),
+            duration: 10.0,
+        };
+        app.world_mut()
+            .write_message(characters::DialogueRequest(old.clone()));
+        app.update();
+        assert!(
+            app.world()
+                .resource::<GameSession>()
+                .presentation
+                .dialogue
+                .is_some()
+        );
+        press(&mut app, Control::NewMatch);
+        app.world_mut()
+            .write_message(characters::DialogueRequest(old));
+        app.update();
+        let state = &app.world().resource::<GameSession>().presentation;
+        assert_ne!(state.session, epoch);
+        assert!(state.dialogue.is_none());
+        assert_eq!(state.seats[1].expression, CharacterExpression::Neutral);
+        let after = app
+            .world_mut()
+            .query_filtered::<Entity, With<characters::PortraitFrame>>()
+            .iter(app.world())
+            .collect::<Vec<_>>();
+        assert_eq!(entities, after);
     }
 
     #[test]

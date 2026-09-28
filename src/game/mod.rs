@@ -1,5 +1,6 @@
 use bevy::prelude::*;
 use poker_lab::{
+    characters::{PresentationEvent, PresentationState},
     npc::{
         BasicNpc, PersonalityStrategy, Strategy,
         profiles::{PROFILES, display_name},
@@ -80,6 +81,7 @@ pub struct GameSession {
     pub replace_on_type: bool,
     pub error: Option<String>,
     pub feedback: VecDeque<String>,
+    pub presentation: PresentationState,
     event_cursor: usize,
 }
 
@@ -90,6 +92,7 @@ impl GameSession {
             TableMode::Four => MatchEngine::Four(Box::new(FourPlayerMatch::new(seed))),
         };
         engine.start_next_hand().expect("new match can start");
+        let id = SESSION_ID.fetch_add(1, Ordering::Relaxed);
         let mut session = Self {
             engine,
             mode,
@@ -102,7 +105,7 @@ impl GameSession {
                 )
             }),
             pending: None,
-            id: SESSION_ID.fetch_add(1, Ordering::Relaxed),
+            id,
             delay: Timer::from_seconds(settings.delay_seconds.max(0.0), TimerMode::Once),
             dirty: true,
             bet_input: String::new(),
@@ -111,6 +114,10 @@ impl GameSession {
             error: None,
             feedback: VecDeque::new(),
             event_cursor: 0,
+            presentation: PresentationState {
+                session: id,
+                ..Default::default()
+            },
         };
         session.refresh();
         session
@@ -155,6 +162,9 @@ impl GameSession {
         // Consume only public events into the live activity list. Private deal/burn
         // events stay in the engine's replay history and never enter UI text.
         for event in &self.engine.history()[self.event_cursor..] {
+            if let Some(public) = presentation_event(event) {
+                self.presentation.apply(&public);
+            }
             let text = match event {
                 GameEvent::BlindPosted { seat, amount } => {
                     Some(format!("{}: blind {amount}", display_name(*seat)))
@@ -185,9 +195,35 @@ impl GameSession {
             }
         }
         self.event_cursor = self.engine.history().len();
+        self.presentation.set_actor(self.engine.actor());
         while self.feedback.len() > 3 {
             self.feedback.pop_front();
         }
+    }
+}
+
+/// The trusted host strips private fields before anything reaches presentation.
+fn presentation_event(event: &GameEvent) -> Option<PresentationEvent> {
+    match event {
+        GameEvent::HandStarted { number, stacks, .. } => Some(PresentationEvent::HandStarted {
+            number: *number,
+            stacks: stacks.clone(),
+        }),
+        GameEvent::PlayerActed { seat, action, .. } => Some(PresentationEvent::Acted {
+            seat: *seat,
+            action: *action,
+        }),
+        GameEvent::HandCompleted { outcome, stacks } => Some(PresentationEvent::Settled {
+            pot: outcome.pot,
+            awards: outcome.awards.clone(),
+            stacks: stacks.clone(),
+            shown: outcome
+                .hands
+                .as_ref()
+                .map(|h| h.iter().map(Option::is_some).collect())
+                .unwrap_or_else(|| vec![false; stacks.len()]),
+        }),
+        _ => None,
     }
 }
 
@@ -318,6 +354,43 @@ impl GameSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn presentation_filter_discards_private_deals_burns_and_shuffle_seed() {
+        let mut first = PokerMatch::new(1);
+        let mut second = PokerMatch::new(999);
+        first.start_next_hand().unwrap();
+        second.start_next_hand().unwrap();
+        let public_a: Vec<_> = first
+            .history()
+            .iter()
+            .filter_map(presentation_event)
+            .collect();
+        let public_b: Vec<_> = second
+            .history()
+            .iter()
+            .filter_map(presentation_event)
+            .collect();
+        assert_eq!(public_a, public_b); // Different hidden cards/seed, identical presentation.
+        for event in first.history() {
+            if matches!(
+                event,
+                GameEvent::CardsDealt { .. } | GameEvent::CardBurned { .. }
+            ) {
+                assert!(presentation_event(event).is_none());
+            }
+        }
+        let card = "As".parse().unwrap();
+        assert!(presentation_event(&GameEvent::CardBurned { card }).is_none());
+        let before = format!("{first:?}");
+        let mut model = PresentationState::default();
+        model.reset(1);
+        for event in public_a {
+            model.apply(&event);
+        }
+        model.tick(100.0);
+        assert_eq!(format!("{first:?}"), before);
+    }
 
     #[test]
     fn delayed_decisions_cannot_cross_turns_or_restarts() {

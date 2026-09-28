@@ -27,7 +27,20 @@ fn main() {
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Poker Lab UI check".into(),
-                resolution: if std::env::args().any(|a| a == "--small") {
+                resize_constraints: if std::env::args().any(|a| a == "--qhd") {
+                    bevy::window::WindowResizeConstraints {
+                        min_width: 2560.0,
+                        min_height: 1440.0,
+                        ..default()
+                    }
+                } else {
+                    default()
+                },
+                resolution: if std::env::args().any(|a| a == "--hd") {
+                    (1920, 1080).into()
+                } else if std::env::args().any(|a| a == "--qhd") {
+                    (2560, 1440).into()
+                } else if std::env::args().any(|a| a == "--small") {
                     (1000, 820).into()
                 } else {
                     (1120, 860).into()
@@ -57,7 +70,7 @@ fn click(world: &mut World, label: &str) {
     let parent = world
         .query::<(&Text, &ChildOf)>()
         .iter(world)
-        .find(|(t, _)| t.0 == label)
+        .find(|(t, parent)| t.0 == label && world.get::<Button>(parent.parent()).is_some())
         .unwrap_or_else(|| panic!("missing button label {label}"))
         .1
         .parent();
@@ -112,7 +125,20 @@ fn drive(world: &mut World) {
                 game::AppState::InGame
             );
             capture(world, "table");
-            for name in ["Mira", "Jax", "Nova"] {
+            let window = world.query::<&Window>().single(world).unwrap();
+            println!(
+                "Layout: {}x{} logical, {}x{} physical",
+                window.width(),
+                window.height(),
+                window.physical_width(),
+                window.physical_height()
+            );
+            let images = world.resource::<Assets<Image>>();
+            let portraits = world.resource::<ui::characters::PortraitAssets>();
+            for handle in &portraits.sheets {
+                assert!(images.contains(handle.id()), "portrait must load");
+            }
+            for name in ["Ananya", "Freya", "Yuna"] {
                 assert!(
                     world
                         .query::<&Text>()
