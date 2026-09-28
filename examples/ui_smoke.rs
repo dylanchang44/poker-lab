@@ -1,0 +1,206 @@
+//! Optional graphical check: cargo run --example ui_smoke
+//! Drives Bevy's pointer hit testing (not OS input), saves /tmp/poker-lab-*.png,
+//! then exits. Requires a working desktop and GPU.
+#[path = "../src/game/mod.rs"]
+mod game;
+#[path = "../src/ui/mod.rs"]
+mod ui;
+
+use bevy::{
+    input::InputSystems,
+    prelude::*,
+    render::view::screenshot::{Screenshot, save_to_disk},
+    ui::UiSystems,
+};
+use poker_lab::poker::{Phase, Seat};
+
+#[derive(Resource, Default)]
+struct Progress {
+    frame: u32,
+    next: u32,
+    step: u32,
+    expected_amount: String,
+}
+
+fn main() {
+    App::new()
+        .add_plugins(DefaultPlugins.set(WindowPlugin {
+            primary_window: Some(Window {
+                title: "Poker Lab UI check".into(),
+                resolution: if std::env::args().any(|a| a == "--small") {
+                    (1000, 820).into()
+                } else {
+                    (1120, 860).into()
+                },
+                ..default()
+            }),
+            ..default()
+        }))
+        .insert_resource(game::MatchSeed(Some(42)))
+        .init_resource::<Progress>()
+        .init_state::<game::AppState>()
+        .add_plugins(ui::UiPlugin)
+        .add_systems(
+            PreUpdate,
+            drive.after(InputSystems).before(UiSystems::Focus),
+        )
+        .run();
+}
+
+fn capture(world: &mut World, name: &str) {
+    world
+        .spawn(Screenshot::primary_window())
+        .observe(save_to_disk(format!("/tmp/poker-lab-{name}.png")));
+}
+
+fn click(world: &mut World, label: &str) {
+    let parent = world
+        .query::<(&Text, &ChildOf)>()
+        .iter(world)
+        .find(|(t, _)| t.0 == label)
+        .unwrap_or_else(|| panic!("missing button label {label}"))
+        .1
+        .parent();
+    assert!(
+        world.get::<Button>(parent).is_some(),
+        "button {label} is disabled"
+    );
+    let position = world.get::<UiGlobalTransform>(parent).unwrap().translation;
+    let size = world.get::<ComputedNode>(parent).unwrap().size();
+    let mut window = world.query::<&mut Window>().single_mut(world).unwrap();
+    assert!(
+        position.x - size.x / 2.0 >= 0.0
+            && position.x + size.x / 2.0 <= window.physical_width() as f32
+    );
+    assert!(
+        position.y - size.y / 2.0 >= 0.0
+            && position.y + size.y / 2.0 <= window.physical_height() as f32
+    );
+    // This input belongs to the test, not the OS pointer. Avoid asking Winit to
+    // warp a Wayland cursor when it observes a changed Window component.
+    window
+        .bypass_change_detection()
+        .set_physical_cursor_position(Some(position.as_dvec2()));
+    world
+        .resource_mut::<ButtonInput<MouseButton>>()
+        .press(MouseButton::Left);
+    println!("Click {label} at {position}");
+}
+
+fn drive(world: &mut World) {
+    world
+        .resource_mut::<ButtonInput<MouseButton>>()
+        .release(MouseButton::Left);
+    let mut progress = world.resource_mut::<Progress>();
+    progress.frame += 1;
+    assert!(progress.frame < 6000, "graphical smoke check timed out");
+    if progress.frame < 90 || progress.frame < progress.next {
+        return;
+    }
+    progress.next = progress.frame + 90;
+    let step = progress.step;
+    match step {
+        0 => {
+            capture(world, "menu");
+        }
+        1 => {
+            click(world, "Start Game");
+        }
+        2 => {
+            assert_eq!(
+                *world.resource::<State<game::AppState>>().get(),
+                game::AppState::InGame
+            );
+            capture(world, "table");
+            for name in ["Mira", "Jax", "Nova"] {
+                assert!(
+                    world
+                        .query::<&Text>()
+                        .iter(world)
+                        .any(|t| t.0.starts_with(name))
+                );
+            }
+        }
+        3 => {
+            let view = world
+                .resource::<game::GameSession>()
+                .engine
+                .observe(Seat::Human);
+            if view.actor != Some(Seat::Human) {
+                return;
+            }
+            let range = view.legal.wager.expect("seeded opening offers raise");
+            world.resource_mut::<Progress>().expected_amount =
+                (view.street_bets[0] + view.to_call + view.pot + view.to_call)
+                    .clamp(range.min_to, range.max_to)
+                    .to_string();
+            click(world, "Pot");
+        }
+        4 => {
+            assert_eq!(
+                world.resource::<game::GameSession>().bet_input,
+                world.resource::<Progress>().expected_amount
+            );
+            click(world, "Raise");
+        }
+        5 => {
+            let view = world
+                .resource::<game::GameSession>()
+                .engine
+                .observe(Seat::Human);
+            if view.phase == Phase::HandComplete {
+                capture(world, "result");
+            } else {
+                if view.actor == Some(Seat::Human) {
+                    let label = if let Some(call) = view.legal.call {
+                        format!("Call {call}")
+                    } else {
+                        "Check".into()
+                    };
+                    click(world, &label);
+                    if !view.board.is_empty() {
+                        capture(world, "board");
+                    }
+                }
+                return;
+            }
+        }
+        6 => {
+            click(world, "Next Hand");
+        }
+        7 => {
+            let view = world
+                .resource::<game::GameSession>()
+                .engine
+                .observe(Seat::Human);
+            assert_eq!(view.hand_number, 2);
+            assert_eq!(view.dealer, Seat::Npc);
+            capture(world, "next-hand");
+        }
+        8 => {
+            click(world, "New Match");
+        }
+        9 => {
+            assert_eq!(
+                world
+                    .resource::<game::GameSession>()
+                    .engine
+                    .observe(Seat::Human)
+                    .hand_number,
+                1
+            );
+            click(world, "Back to Menu");
+        }
+        _ => {
+            assert_eq!(
+                *world.resource::<State<game::AppState>>().get(),
+                game::AppState::MainMenu
+            );
+            println!(
+                "Graphical smoke check passed: four seats, menu, hit targets, pot sizing, raise, hand result, next hand, restart, menu return."
+            );
+            world.write_message(AppExit::Success);
+        }
+    }
+    world.resource_mut::<Progress>().step += 1;
+}

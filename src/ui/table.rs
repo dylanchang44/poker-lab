@@ -1,0 +1,438 @@
+use super::{BUTTON, FELT, GOLD, MUTED, ScreenRoot, TEXT, controls::Control, label};
+use crate::game::GameSession;
+use bevy::prelude::*;
+use poker_lab::npc::profiles::{display_name, profile};
+use poker_lab::poker::{
+    Action, Observation, Phase, Seat,
+    cards::{Card, Suit},
+};
+
+fn column(gap: f32) -> Node {
+    Node {
+        flex_direction: FlexDirection::Column,
+        align_items: AlignItems::Center,
+        row_gap: Val::Px(gap),
+        ..default()
+    }
+}
+fn row(gap: f32) -> Node {
+    Node {
+        align_items: AlignItems::Center,
+        justify_content: JustifyContent::Center,
+        column_gap: Val::Px(gap),
+        ..default()
+    }
+}
+
+pub fn render(
+    mut commands: Commands,
+    mut session: ResMut<GameSession>,
+    roots: Query<Entity, With<ScreenRoot>>,
+) {
+    if !session.dirty {
+        return;
+    }
+    session.dirty = false;
+    for root in &roots {
+        commands.entity(root).despawn();
+    }
+    let view = session.engine.observe(Seat::Human);
+    commands
+        .spawn((
+            ScreenRoot,
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                padding: UiRect::all(Val::Px(14.0)),
+                justify_content: JustifyContent::Center,
+                ..column(8.0)
+            },
+        ))
+        .with_children(|root| {
+            root.spawn(Node {
+                width: Val::Percent(100.0),
+                justify_content: JustifyContent::SpaceBetween,
+                ..row(20.0)
+            })
+            .with_children(|header| {
+                label(
+                    header,
+                    format!(
+                        "POKER LAB   /   Hand {}   /   {}",
+                        view.hand_number,
+                        view.phase.label()
+                    ),
+                    23.0,
+                    GOLD,
+                );
+                header.spawn(row(8.0)).with_children(|buttons| {
+                    control(buttons, "New Match", Control::NewMatch, true, 130.0);
+                    control(buttons, "Back to Menu", Control::Menu, true, 150.0);
+                });
+            });
+            if view.stacks.len() == 4 {
+                player(root, &view, Seat::Jax);
+                root.spawn(row(22.0)).with_children(|middle| {
+                    player(middle, &view, Seat::Npc);
+                    board(middle, &view);
+                    player(middle, &view, Seat::Nova);
+                });
+            } else {
+                player(root, &view, Seat::Npc);
+                board(root, &view);
+            }
+            player(root, &view, Seat::Human);
+            let status = if let Some(error) = &session.error {
+                error.clone()
+            } else {
+                status(&view)
+            };
+            label(root, status, 20.0, GOLD);
+            controls(root, &view, &session);
+            label(
+                root,
+                session
+                    .feedback
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("   |   "),
+                13.0,
+                MUTED,
+            );
+            label(
+                root,
+                "Virtual chips only   /   c Clubs   d Diamonds   h Hearts   s Spades",
+                12.0,
+                MUTED,
+            );
+        });
+}
+
+fn board(parent: &mut ChildSpawnerCommands, view: &Observation) {
+    parent
+        .spawn((
+            Node {
+                width: Val::Px(440.0),
+                padding: UiRect::all(Val::Px(16.0)),
+                border: UiRect::all(Val::Px(2.0)),
+                border_radius: BorderRadius::all(Val::Px(45.0)),
+                ..column(12.0)
+            },
+            BackgroundColor(FELT),
+            BorderColor::all(Color::srgb(0.19, 0.40, 0.34)),
+        ))
+        .with_children(|felt| {
+            label(
+                felt,
+                view.outcome
+                    .as_ref()
+                    .map(|r| format!("POT AWARDED  {}", r.pot))
+                    .unwrap_or_else(|| format!("POT  {}", view.pot)),
+                23.0,
+                TEXT,
+            );
+            felt.spawn(row(10.0)).with_children(|cards| {
+                for i in 0..5 {
+                    card(cards, view.board.get(i).copied(), false);
+                }
+            });
+            if let Some(result) = &view.outcome {
+                for (index, pot) in result.pots.iter().enumerate() {
+                    let awards = pot
+                        .awards
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, amount)| **amount > 0)
+                        .map(|(i, amount)| format!("{} +{amount}", display_name(Seat::ALL[i])))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    label(
+                        felt,
+                        format!("{} {}: {awards}", pot_name(index), pot.pot.amount),
+                        13.0,
+                        TEXT,
+                    );
+                }
+            } else if view
+                .in_hand
+                .iter()
+                .enumerate()
+                .any(|(i, live)| *live && view.stacks[i] == 0)
+            {
+                label(
+                    felt,
+                    view.pots
+                        .iter()
+                        .enumerate()
+                        .map(|(i, p)| format!("{} {}", pot_name(i), p.amount))
+                        .collect::<Vec<_>>()
+                        .join(" / "),
+                    13.0,
+                    MUTED,
+                );
+                label(
+                    felt,
+                    "Pot layers provisional until bets settle",
+                    11.0,
+                    MUTED,
+                );
+            } else {
+                label(
+                    felt,
+                    format!("Blinds {} / {}", view.blinds[0], view.blinds[1]),
+                    13.0,
+                    MUTED,
+                );
+                label(felt, "Pot includes all chips in front", 11.0, MUTED);
+            }
+        });
+}
+fn pot_name(index: usize) -> String {
+    if index == 0 {
+        "Main".into()
+    } else {
+        format!("Side {index}")
+    }
+}
+
+fn player(parent: &mut ChildSpawnerCommands, view: &Observation, seat: Seat) {
+    let i = seat.index();
+    let mut markers = Vec::new();
+    if view.dealer == seat {
+        markers.push("D".to_string());
+    }
+    if view.small_blind == Some(seat) {
+        markers.push(format!("SB {}", view.blinds[0]));
+    }
+    if view.big_blind == seat {
+        markers.push(format!("BB {}", view.blinds[1]));
+    }
+    let state = if view.eliminated[i] {
+        "OUT"
+    } else if view.folded[i] {
+        "FOLDED"
+    } else if view.stacks[i] == 0 {
+        "ALL-IN"
+    } else if view.actor == Some(seat) {
+        "TO ACT"
+    } else {
+        ""
+    };
+    let p = profile(seat);
+    let accent = Color::srgb(p.accent[0], p.accent[1], p.accent[2]);
+    parent
+        .spawn((
+            Node {
+                width: Val::Px(210.0),
+                padding: UiRect::all(Val::Px(8.0)),
+                border: UiRect::all(Val::Px(2.0)),
+                border_radius: BorderRadius::all(Val::Px(12.0)),
+                ..column(4.0)
+            },
+            BackgroundColor(Color::srgb(0.045, 0.075, 0.10)),
+            BorderColor::all(if view.actor == Some(seat) {
+                GOLD
+            } else {
+                accent.with_alpha(0.35)
+            }),
+        ))
+        .with_children(|panel| {
+            label(
+                panel,
+                format!("{}   {} chips", display_name(seat), view.stacks[i]),
+                18.0,
+                accent,
+            );
+            label(
+                panel,
+                format!("{}  {state}", markers.join(" / ")),
+                13.0,
+                if view.actor == Some(seat) {
+                    GOLD
+                } else {
+                    MUTED
+                },
+            );
+            let hole = if seat == Seat::Human {
+                view.hole_cards
+            } else {
+                view.revealed_cards.as_ref().and_then(|h| h[i])
+            };
+            panel.spawn(row(8.0)).with_children(|row| {
+                for index in 0..2 {
+                    card(
+                        row,
+                        hole.map(|h| h[index]),
+                        view.in_hand[i] || view.folded[i],
+                    );
+                }
+            });
+            label(
+                panel,
+                format!(
+                    "In front: {} / {}",
+                    view.street_bets[i],
+                    view.last_actions[i]
+                        .map(|a| a.to_string())
+                        .unwrap_or_else(|| "-".into())
+                ),
+                12.0,
+                MUTED,
+            );
+            if let Some(hand) = view
+                .outcome
+                .as_ref()
+                .and_then(|o| o.hands.as_ref())
+                .and_then(|h| h[i])
+            {
+                label(panel, hand.category(), 12.0, TEXT);
+            }
+        });
+}
+
+fn card(parent: &mut ChildSpawnerCommands, card: Option<Card>, hidden: bool) {
+    let background = if card.is_some() {
+        Color::srgb(0.92, 0.93, 0.90)
+    } else {
+        Color::srgb(0.065, 0.12, 0.18)
+    };
+    parent
+        .spawn((
+            Node {
+                width: Val::Px(58.0),
+                height: Val::Px(76.0),
+                flex_shrink: 0.0,
+                justify_content: JustifyContent::Center,
+                border_radius: BorderRadius::all(Val::Px(7.0)),
+                border: UiRect::all(Val::Px(1.0)),
+                ..column(3.0)
+            },
+            BackgroundColor(background),
+            BorderColor::all(Color::srgb(0.32, 0.43, 0.46)),
+        ))
+        .with_children(|node| {
+            let color = if card.is_some_and(|c| c.suit.is_red()) {
+                Color::srgb(0.72, 0.12, 0.18)
+            } else {
+                Color::srgb(0.08, 0.13, 0.2)
+            };
+            if let Some(card) = card {
+                label(node, card.to_string(), 27.0, color);
+                let suit = match card.suit {
+                    Suit::Clubs => "CLUBS",
+                    Suit::Diamonds => "DIAMONDS",
+                    Suit::Hearts => "HEARTS",
+                    Suit::Spades => "SPADES",
+                };
+                label(node, suit, 9.0, color);
+            } else {
+                label(node, if hidden { "?" } else { "-" }, 26.0, MUTED);
+            }
+        });
+}
+
+fn status(view: &Observation) -> String {
+    if let Some(result) = &view.outcome {
+        let awards = result
+            .awards
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| **n > 0)
+            .map(|(i, n)| format!("{} +{n}", display_name(Seat::ALL[i])))
+            .collect::<Vec<_>>()
+            .join(" / ");
+        if view.phase == Phase::MatchComplete {
+            let winner = view.stacks.iter().position(|n| *n > 0).unwrap();
+            format!(
+                "{} wins the match!  {awards}",
+                display_name(Seat::ALL[winner])
+            )
+        } else {
+            format!("Hand complete  /  {awards}")
+        }
+    } else if view.actor == Some(Seat::Human) {
+        if view.to_call > 0 {
+            format!("Your turn   /   {} to call", view.legal.call.unwrap_or(0))
+        } else {
+            "Your turn   /   Check or bet".into()
+        }
+    } else {
+        format!(
+            "{} is thinking...{}",
+            view.actor.map(display_name).unwrap_or("Table"),
+            if view.eliminated[0] {
+                "  /  You are out; spectating"
+            } else {
+                ""
+            }
+        )
+    }
+}
+
+fn controls(parent: &mut ChildSpawnerCommands, view: &Observation, session: &GameSession) {
+    if matches!(view.phase, Phase::HandComplete | Phase::MatchComplete) {
+        parent.spawn(row(12.0)).with_children(|row| {
+            if view.phase == Phase::HandComplete {
+                control(row, "Next Hand", Control::NextHand, true, 160.0);
+            }
+            if view.phase == Phase::MatchComplete {
+                label(
+                    row,
+                    "New Match starts a fresh table; Back to Menu leaves the table.",
+                    14.0,
+                    MUTED,
+                );
+            }
+        });
+        return;
+    }
+    parent.spawn(column(8.0)).with_children(|panel| {
+        if let Some(range)=view.legal.wager {
+            panel.spawn(row(8.0)).with_children(|row| {
+                label(row,format!("{} to  [{}-{}]",if range.is_raise {"Raise"} else {"Bet"},range.min_to,range.max_to),15.0,MUTED);
+                control(row,&format!("{}{}",session.bet_input,if session.editing {" |"} else {""}),Control::EditAmount,true,110.0);
+                for (name,action) in [("Min",Control::Minimum),("1/2",Control::HalfPot),("Pot",Control::Pot),("Max",Control::Maximum)] {control(row,name,action,true,70.0);}
+            });
+            label(panel,if session.editing {"Type chips; Backspace edits; Enter confirms amount; Escape resets. Then click Bet / Raise."} else {"Click the amount to type. This is your TOTAL bet on this street."},12.0,MUTED);
+        }
+        panel.spawn(row(10.0)).with_children(|row| {
+            control(row,"Fold",Control::Act(Action::Fold),view.legal.fold,120.0);
+            if view.legal.check {control(row,"Check",Control::Act(Action::Check),true,140.0);}
+            else {control(row,&view.legal.call.map(|n|format!("Call {n}")).unwrap_or_else(||"Check / Call".into()),Control::Act(Action::Call),view.legal.call.is_some(),140.0);}
+            let wager=view.legal.wager;
+            let valid=wager.is_some_and(|r|session.bet_input.parse::<u32>().is_ok_and(|n|(r.min_to..=r.max_to).contains(&n)));
+            control(row,if wager.is_some_and(|r|r.is_raise) {"Raise"} else {"Bet"},Control::Wager,valid,120.0);
+            control(row,&format!("All-in {}",view.stacks[0]),Control::Act(Action::AllIn),view.legal.all_in,150.0);
+        });
+    });
+}
+
+fn control(
+    parent: &mut ChildSpawnerCommands,
+    text: &str,
+    control: Control,
+    enabled: bool,
+    width: f32,
+) {
+    let mut entity = parent.spawn((
+        Node {
+            width: Val::Px(width),
+            height: Val::Px(40.0),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            border_radius: BorderRadius::all(Val::Px(7.0)),
+            ..default()
+        },
+        BackgroundColor(if enabled {
+            BUTTON
+        } else {
+            Color::srgb(0.10, 0.14, 0.18)
+        }),
+    ));
+    // Disabled controls have no Button or Control components and cannot dispatch.
+    if enabled {
+        entity.insert((Button, control));
+    }
+    entity.with_children(|parent| label(parent, text, 17.0, if enabled { TEXT } else { MUTED }));
+}
