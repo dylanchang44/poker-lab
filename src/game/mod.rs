@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 use poker_lab::{
     characters::{PresentationEvent, PresentationState},
+    conversation::{ConversationCue, Speaker},
     npc::{
         BasicNpc, PersonalityStrategy, Strategy,
         profiles::{PROFILES, display_name},
@@ -81,6 +82,8 @@ pub struct GameSession {
     pub replace_on_type: bool,
     pub error: Option<String>,
     pub feedback: VecDeque<String>,
+    pub conversation_cues: VecDeque<ConversationCue>,
+    pub public_winners: VecDeque<String>,
     pub presentation: PresentationState,
     event_cursor: usize,
 }
@@ -113,6 +116,8 @@ impl GameSession {
             replace_on_type: true,
             error: None,
             feedback: VecDeque::new(),
+            conversation_cues: VecDeque::new(),
+            public_winners: VecDeque::new(),
             event_cursor: 0,
             presentation: PresentationState {
                 session: id,
@@ -161,9 +166,23 @@ impl GameSession {
             .unwrap_or_default();
         // Consume only public events into the live activity list. Private deal/burn
         // events stay in the engine's replay history and never enter UI text.
-        for event in &self.engine.history()[self.event_cursor..] {
+        for (offset, event) in self.engine.history()[self.event_cursor..]
+            .iter()
+            .enumerate()
+        {
+            let event_id = self.event_cursor + offset + 1;
             if let Some(public) = presentation_event(event) {
                 self.presentation.apply(&public);
+            }
+            if let Some(cue) = conversation_cue(event_id, event) {
+                self.conversation_cues.push_back(cue);
+            }
+            if let GameEvent::PotAwarded { seat, amount } = event {
+                self.public_winners
+                    .push_back(format!("{} won {amount} chips", display_name(*seat)));
+                while self.public_winners.len() > 3 {
+                    self.public_winners.pop_front();
+                }
             }
             let text = match event {
                 GameEvent::BlindPosted { seat, amount } => {
@@ -199,7 +218,42 @@ impl GameSession {
         while self.feedback.len() > 3 {
             self.feedback.pop_front();
         }
+        while self.conversation_cues.len() > 8 {
+            self.conversation_cues.pop_front();
+        }
     }
+}
+
+fn conversation_cue(event_id: usize, event: &GameEvent) -> Option<ConversationCue> {
+    let (speaker, priority) = match event {
+        GameEvent::HandStarted { .. } => (Speaker::Freya, 1),
+        GameEvent::PlayerActed {
+            seat: Seat::Human,
+            action: Action::BetTo(to) | Action::RaiseTo(to),
+            ..
+        } if *to >= 100 => (Speaker::Ananya, 2),
+        GameEvent::PlayerActed {
+            seat: Seat::Human,
+            action: Action::AllIn,
+            ..
+        } => (Speaker::Freya, 3),
+        GameEvent::ShowdownStarted { .. } => (Speaker::Yuna, 2),
+        GameEvent::PotAwarded { seat, amount } if *amount >= 150 => (
+            if *seat == Seat::Human {
+                Speaker::Freya
+            } else {
+                Speaker::from_seat(*seat)
+            },
+            2,
+        ),
+        GameEvent::PlayerEliminated { seat } if *seat == Seat::Human => (Speaker::Ananya, 3),
+        _ => return None,
+    };
+    Some(ConversationCue {
+        event_id,
+        speaker,
+        priority,
+    })
 }
 
 /// The trusted host strips private fields before anything reaches presentation.

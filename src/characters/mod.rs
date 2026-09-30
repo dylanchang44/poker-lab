@@ -142,6 +142,8 @@ pub struct PresentationState {
     pub seats: [CharacterState; 4],
     pub dialogue: Option<DialogueLine>,
     pub dialogue_left: f32,
+    /// Stage 3 preset lines remain available when conversation is disabled.
+    pub suppress_samples: bool,
 }
 impl PresentationState {
     pub fn reset(&mut self, session: u64) {
@@ -254,7 +256,7 @@ impl PresentationState {
                     if raise { 1.2 + c.intensity } else { 0.35 },
                 );
                 // One short line at a time, not a queue of stale chatter.
-                if raise && self.dialogue.is_none() {
+                if raise && self.dialogue.is_none() && !self.suppress_samples {
                     self.sample_line(*seat, c.raise_line);
                 }
             }
@@ -300,6 +302,9 @@ impl PresentationState {
                     .iter()
                     .filter(|c| c.seat.index() < awards.len())
                     .max_by_key(|c| awards[c.seat.index()]);
+                if self.suppress_samples {
+                    return;
+                }
                 if let Some(c) = speaker.filter(|c| awards[c.seat.index()] > 0) {
                     self.sample_line(c.seat, c.win_line);
                 } else if let Some(c) = CAST

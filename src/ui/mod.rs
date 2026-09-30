@@ -3,6 +3,7 @@ use bevy::prelude::*;
 use crate::game::AppState;
 pub mod characters;
 mod controls;
+pub mod conversation;
 mod table;
 
 const BACKGROUND: Color = Color::srgb(0.035, 0.05, 0.08);
@@ -24,6 +25,7 @@ impl Plugin for UiPlugin {
             .init_resource::<crate::game::NpcSettings>()
             .init_resource::<characters::PortraitAssets>()
             .init_resource::<characters::CharacterAnimation>()
+            .init_resource::<conversation::ConversationUi>()
             .init_resource::<UiScale>()
             .add_message::<characters::DialogueRequest>()
             .add_systems(Startup, (setup_camera, characters::load))
@@ -43,14 +45,24 @@ impl Plugin for UiPlugin {
             .add_systems(
                 Update,
                 (
-                    controls::buttons,
-                    controls::keyboard,
-                    crate::game::npc_turn,
-                    characters::tick,
-                    table::render,
-                    characters::sync_readouts,
-                    characters::animate,
-                    characters::dialogue,
+                    (
+                        controls::buttons,
+                        conversation::buttons,
+                        controls::keyboard,
+                        conversation::keyboard,
+                        crate::game::npc_turn,
+                        conversation::update,
+                        characters::tick,
+                    )
+                        .chain(),
+                    (
+                        table::render,
+                        conversation::render,
+                        characters::sync_readouts,
+                        characters::animate,
+                        characters::dialogue,
+                    )
+                        .chain(),
                 )
                     .chain()
                     .run_if(in_state(AppState::InGame)),

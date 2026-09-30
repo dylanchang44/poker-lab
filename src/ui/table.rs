@@ -86,6 +86,7 @@ pub fn render(
                             super::characters::spawn(table, seat, view.stacks.len() == 2);
                         }
                         super::characters::spawn_dialogue(table);
+                        super::conversation::spawn(table);
                     })
                     .id();
             });

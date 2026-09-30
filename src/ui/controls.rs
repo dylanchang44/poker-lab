@@ -1,3 +1,4 @@
+use super::conversation::ConversationUi;
 use super::{BUTTON, BUTTON_HOVERED, BUTTON_PRESSED};
 use crate::game::{AppState, GameSession, MatchSeed, NpcSettings};
 use bevy::{
@@ -37,6 +38,7 @@ type ButtonQuery<'w, 's> = Query<
 pub fn buttons(
     mut buttons: ButtonQuery,
     mut session: ResMut<GameSession>,
+    mut chat: ResMut<ConversationUi>,
     seed: Res<MatchSeed>,
     settings: Res<NpcSettings>,
     mut next: ResMut<NextState<AppState>>,
@@ -50,6 +52,7 @@ pub fn buttons(
         if *interaction != Interaction::Pressed {
             continue;
         }
+        chat.editing = false;
         match *control {
             Control::Act(action) => session.submit(Seat::Human, action),
             Control::Wager => submit_wager(&mut session),
@@ -102,9 +105,13 @@ fn submit_wager(session: &mut GameSession) {
     }
 }
 
-pub fn keyboard(mut events: MessageReader<KeyboardInput>, mut session: ResMut<GameSession>) {
+pub fn keyboard(
+    mut events: MessageReader<KeyboardInput>,
+    mut session: ResMut<GameSession>,
+    chat: Res<ConversationUi>,
+) {
     for event in events.read() {
-        if !session.editing || event.state != ButtonState::Pressed {
+        if chat.editing || !session.editing || event.state != ButtonState::Pressed {
             continue;
         }
         let Some(range) = session.engine.legal_actions(Seat::Human).wager else {

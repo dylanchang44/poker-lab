@@ -7,7 +7,10 @@ mod game;
 mod ui;
 
 use bevy::{
-    input::InputSystems,
+    input::{
+        ButtonState, InputSystems,
+        keyboard::{Key, KeyCode, KeyboardInput},
+    },
     prelude::*,
     render::view::screenshot::{Screenshot, save_to_disk},
     ui::UiSystems,
@@ -100,6 +103,29 @@ fn click(world: &mut World, label: &str) {
     println!("Click {label} at {position}");
 }
 
+fn type_chat(world: &mut World, text: &str) {
+    let window = world
+        .query_filtered::<Entity, With<Window>>()
+        .single(world)
+        .unwrap();
+    world.write_message(KeyboardInput {
+        key_code: KeyCode::KeyH,
+        logical_key: Key::Character(text.into()),
+        state: ButtonState::Pressed,
+        text: Some(text.into()),
+        repeat: false,
+        window,
+    });
+    world.write_message(KeyboardInput {
+        key_code: KeyCode::Enter,
+        logical_key: Key::Enter,
+        state: ButtonState::Pressed,
+        text: None,
+        repeat: false,
+        window,
+    });
+}
+
 fn drive(world: &mut World) {
     world
         .resource_mut::<ButtonInput<MouseButton>>()
@@ -148,6 +174,38 @@ fn drive(world: &mut World) {
             }
         }
         3 => {
+            click(world, "Everyone");
+        }
+        4 => {
+            assert_eq!(
+                world.resource::<ui::conversation::ConversationUi>().target,
+                poker_lab::conversation::Target::Ananya
+            );
+            click(world, "Click to chat");
+        }
+        5 => {
+            assert!(world.resource::<ui::conversation::ConversationUi>().editing);
+            type_chat(world, "Hello, Ananya");
+        }
+        6 => {
+            let chat = world.resource::<ui::conversation::ConversationUi>();
+            assert!(
+                chat.manager
+                    .history()
+                    .iter()
+                    .any(|m| m.text == "Hello, Ananya")
+            );
+            if !chat
+                .manager
+                .history()
+                .iter()
+                .any(|m| m.speaker == poker_lab::conversation::Speaker::Ananya)
+            {
+                return; // A current bubble gets its full reading time before the reply.
+            }
+            capture(world, "chat");
+        }
+        7 => {
             let view = world
                 .resource::<game::GameSession>()
                 .engine
@@ -162,14 +220,14 @@ fn drive(world: &mut World) {
                     .to_string();
             click(world, "Pot");
         }
-        4 => {
+        8 => {
             assert_eq!(
                 world.resource::<game::GameSession>().bet_input,
                 world.resource::<Progress>().expected_amount
             );
             click(world, "Raise");
         }
-        5 => {
+        9 => {
             let view = world
                 .resource::<game::GameSession>()
                 .engine
@@ -191,10 +249,10 @@ fn drive(world: &mut World) {
                 return;
             }
         }
-        6 => {
+        10 => {
             click(world, "Next Hand");
         }
-        7 => {
+        11 => {
             let view = world
                 .resource::<game::GameSession>()
                 .engine
@@ -203,10 +261,10 @@ fn drive(world: &mut World) {
             assert_eq!(view.dealer, Seat::Npc);
             capture(world, "next-hand");
         }
-        8 => {
+        12 => {
             click(world, "New Match");
         }
-        9 => {
+        13 => {
             assert_eq!(
                 world
                     .resource::<game::GameSession>()
@@ -223,7 +281,7 @@ fn drive(world: &mut World) {
                 game::AppState::MainMenu
             );
             println!(
-                "Graphical smoke check passed: four seats, menu, hit targets, pot sizing, raise, hand result, next hand, restart, menu return."
+                "Graphical smoke check passed: four seats, chat target/input/response, menu, pot sizing, raise, hand result, next hand, restart, menu return."
             );
             world.write_message(AppExit::Success);
         }

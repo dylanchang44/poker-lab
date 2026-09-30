@@ -1,12 +1,12 @@
 # Poker Lab
 
-A native Linux Texas Hold'em game built with Rust and Bevy. Stage 3 adds illustrated characters, expressions, reactions and dialogue to your table against **Ananya (The Analyst)**, **Freya (The Gambler)**, and **Yuna (The Observer)**. Each starts with 1,000 virtual chips; blinds stay at 5/10. Play until one player holds all 4,000 chips.
+A native Linux Texas Hold'em game built with Rust and Bevy. Stage 4 adds optional local or remote LLM conversations with **Ananya (The Analyst)**, **Freya (The Gambler)**, and **Yuna (The Observer)**. Their poker strategies remain unchanged. Each starts with 1,000 virtual chips; blinds stay at 5/10. Play until one player holds all 4,000 chips.
 
 ## Requirements
 
-Developed on CachyOS/Arch Linux with Rust/Cargo 1.94.1 stable, Bevy **0.18.1**, and Zed. Any editor works. Dependencies remain explicitly pinned; keep Cargo.lock.
+Developed on CachyOS/Arch Linux with Rust/Cargo 1.94.1 stable, Bevy **0.18.1**, and Zed. Any editor works. Dependencies are explicitly pinned; keep Cargo.lock.
 
-You need Rust/Cargo, a C compiler/linker, pkg-config, a working desktop, and a Vulkan-capable GPU/driver. On Arch, inspect availability of base-devel, pkgconf, wayland, libxkbcommon, libx11, libxcb, vulkan-icd-loader, and your GPU driver; only install missing packages. `vulkaninfo --summary` can check graphics support. Stage 3 includes original generated portrait PNGs in assets/characters and enables Bevy's PNG decoder. No new crate versions, services or system packages are required.
+You need Rust/Cargo, a C compiler/linker, pkg-config, a working desktop, and a Vulkan-capable GPU/driver. On Arch, inspect availability of base-devel, pkgconf, wayland, libxkbcommon, libx11, libxcb, vulkan-icd-loader, and your GPU driver; only install missing packages. `vulkaninfo --summary` can check graphics support. Original generated portrait PNGs are in assets/characters. No LLM installation or API key is needed for the default mock mode or to play poker.
 
 The first Bevy build may take several minutes and several GB. Subsequent builds are incremental.
 
@@ -16,6 +16,7 @@ The first Bevy build may take several minutes and several GB. Subsequent builds 
 cargo run
 cargo run -- --seed 42
 cargo run -- --heads-up --seed 42  # original two-seat/basic-opponent practice
+POKER_LAB_CONFIG=config/conversation.example.json cargo run  # local model (edit model first)
 
 cargo check
 cargo build
@@ -46,6 +47,17 @@ The batch runner opens no window and waits for no thinking timers. Release mode 
 5. NPC decisions run in background threads with a default 0.55-second minimum thinking interval. There is no sleeping on the rendering thread.
 6. Review each hand's main/side-pot awards, then choose **Next Hand**. Eliminated seats stay visibly marked OUT and are skipped. If you bust, you can spectate the remaining players and continue dealing.
 7. **New Match** is always available in the header and resets all stacks. **Back to Menu** abandons the current match. At the final result, start another match or return to the menu.
+8. Use **Table Talk** at lower left: click **Everyone** to cycle to Ananya, Freya, or Yuna; click the input, type up to 240 characters, then press Enter or **Send**. Recent shared dialogue remains visible. Escape leaves chat entry. Clicking a poker control leaves chat entry, so typing a wager does not send chat.
+
+### Conversation configuration
+
+Without `POKER_LAB_CONFIG`, a deterministic mock provider gives short test dialogue. Poker remains fully playable if a configured provider is down: a short preset line replaces a failed response, while the small status label says **Dialogue fallback**. Set `"enabled": false` to disable generated conversation and retain Stage 3's preset public-event lines.
+
+For a local model, use [the example config](config/conversation.example.json): load a chat-tuned model in LM Studio, enable its local server in the Developer tab, and replace `YOUR_LOADED_MODEL_ID` with the identifier shown by LM Studio. Its OpenAI-compatible base URL is normally `http://127.0.0.1:1234/v1`; the app posts to `/chat/completions`. LM Studio documents [server startup](https://lmstudio.ai/docs/developer/openai-compat/tools), [chat completions](https://lmstudio.ai/docs/developer/openai-compat/chat-completions), and [model listing](https://lmstudio.ai/docs/developer/openai-compat/models). Copy the example to a local file if you want to preserve it while editing.
+
+For a remote OpenAI-compatible service, set `"provider": "remote"`, an **HTTPS** `"base_url"` ending at the API version (for example `https://api.openai.com/v1`), and a supported `"model"`. Set `"api_key_env": "POKER_LAB_API_KEY"`, then export that variable in your shell without writing the key into the config or repository. The adapter uses the [Chat Completions API](https://developers.openai.com/api/reference/resources/chat), not poker-action tools. A remote provider with no key falls back safely. The endpoint must support compatible `messages`, `model`, `temperature`, `max_tokens`, and non-streaming responses. Models vary in JSON reliability; all responses are locally validated.
+
+Other settings: `timeout_seconds` (1–120), `max_output_tokens` (16–1024), `temperature` (0–2), `initiative_frequency` (0–3, with 0 disabling unsolicited speech), and `history_limit` (4–32 messages). The history is in memory for the current match only; no API key or chat transcript is saved. A turn sends at most the recent bounded dialogue and a concise public table snapshot. A slow call runs in a worker and never pauses betting/rendering.
 
 D/SB/BB identify the button and blinds. A dead button can remain at an eliminated seat for one hand; sometimes there is no small blind. The engine switches to heads-up blind/action rules with two survivors.
 
@@ -56,6 +68,10 @@ The pot includes chips shown as “In front.” Side-pot layers shown during all
 ```text
 src/main.rs              Window, plugins, seed/practice arguments
 src/lib.rs               Rendering-independent poker/NPC API
+src/conversation/
+  config.rs              Provider settings and safe validation
+  provider.rs            OpenAI-compatible HTTP and deterministic mock adapters
+  mod.rs, tests.rs        Shared history, safe context, routing, validation, worker
 src/poker/
   cards.rs, deck.rs       Cards and seeded ChaCha8 shuffle
   hand.rs                Small rs_poker evaluator adapter
@@ -84,10 +100,12 @@ src/ui/
   table.rs               Four seats, cards, pots, results and legal controls
   controls.rs            Button commands and numeric entry
   characters.rs          Cached portraits, persistent entities, animation/dialogue
+  conversation.rs        Table Talk input, target selector, transcript/status, Bevy bridge
 examples/batch.rs         Personality batch CLI
 examples/simulate.rs      Original heads-up simulation
 examples/ui_smoke.rs      Rendered interaction check and screenshots
 assets/characters/       Three expression atlases, asset contract and prompts
+config/                  Safe example conversation settings
 ```
 
 ### Rules and turn order
@@ -142,15 +160,17 @@ The trusted GameSession maps engine events into a narrow `PresentationEvent`: ha
 
 Bevy's AssetServer loads three sheets once. `ImageNode.rect` selects an expression cell, two image layers crossfade over 0.22 seconds, and `UiTransform` supplies small idle movement and action emphasis. Folded portraits dim; eliminated portraits settle and stay subdued. Frame delta time drives these effects; no animation delays a legal action. A session epoch resets animation and rejects stale dialogue after restart.
 
-`DialogueLine` carries session/hand epochs, speaker seat, text, optional expression and duration. `DialogueRequest` is the Bevy message input. Stage 3 displays a few predefined public-event lines. A Stage 4 provider can produce this same value asynchronously; the UI resolves the speaker name/portrait and expires the bubble. Provider calls and credentials belong outside poker rules and strategies. No conversational model, memory, training, persistence or networking is implemented.
+`DialogueLine` carries session/hand epochs, speaker seat, text, optional expression and duration. `DialogueRequest` is the Bevy message input. Stage 4's `ConversationManager` owns one bounded shared transcript and at most one in-flight provider call. A human message prioritizes its target; table messages select a respondent, and occasional table exchanges may invite one NPC interjection. Public hand/action/win cues and idle time may start a conversation, subject to cooldown. It never requests poker actions from a model.
+
+The conversation context builder whitelists street, board, pot, public stacks/actor, last five public actions and recent awards from an `Observation`; it does **not** serialize its hole cards, revealed private cards, privileged event log or shuffle seed. A worker owns a cloned request and returns only JSON text. Parsing restricts speaker, expression and length; `Eliminated` and gameplay commands are not accepted. Bevy polls the result, checks session/hand epochs, and sends the validated line to the existing portrait/dialogue presentation. Provider errors or timeouts produce harmless preset text. This separation lets Stage 5 store selected dialogue/relationship facts without changing poker rules or NPC strategies.
 
 See [the character asset guide](assets/characters/README.md) for the seven-expression atlas contract, exact dimensions, provenance, replacement instructions and optional-file fallback. See [Stage 3 verification and architecture notes](docs/stage3-verification.md) for tests and practical implementation details.
 
 ## Verification and simulation
 
-See [Stage 3 verification](docs/stage3-verification.md) for current checks and [Stage 2 verification](docs/stage2-verification.md) for the historical 100-match batch. VPIP/PFR/showdown/pot-win are per dealt hand; aggression/fold are per decision. Chips/hand counts commitments after refunds, including blinds. “Pot win” includes any shared or side-pot award; net chips and match wins are also reported. Seats rotate between matches to reduce fixed-seat bias. A cap reports incomplete matches rather than treating them as wins.
+See [Stage 4 verification](docs/stage4-verification.md), [Stage 3 verification](docs/stage3-verification.md), and [Stage 2 verification](docs/stage2-verification.md). VPIP/PFR/showdown/pot-win are per dealt hand; aggression/fold are per decision. Chips/hand counts commitments after refunds, including blinds. “Pot win” includes any shared or side-pot award; net chips and match wins are also reported. Seats rotate between matches to reduce fixed-seat bias. A cap reports incomplete matches rather than treating them as wins.
 
-These are behavior diagnostics, not strength rankings. Uniform opponent ranges, small equity samples and a fixed heuristic policy are intentional limitations; there is no opponent learning or GTO solver. Other limits: fixed blinds, two/four-seat selectable configurations, generated portrait atlases, simple motion, instantaneous runouts, in-memory event history and no save/resume.
+These are behavior diagnostics, not strength rankings. Uniform opponent ranges, small equity samples and a fixed heuristic policy are intentional limitations; there is no opponent learning or GTO solver. Other limits: fixed blinds, two/four-seat selectable configurations, generated portrait atlases, simple motion, instantaneous runouts, in-memory event history and no save/resume. Chat is short-text only, one visible recent-history panel, no streaming tokens, no cross-session memory, no model-driven bets and no moderation service. The mock dialogue is intentionally simple; natural conversation requires a suitable configured model.
 
 ### Manual GUI checklist
 
@@ -163,3 +183,4 @@ These are behavior diagnostics, not strength rankings. Uniform opponent ranges, 
 - Observe thinking/raise/win/loss/fold/elimination reactions and their return to neutral. A folded player's private cards must stay hidden.
 - Watch a dialogue bubble expire; restart during a reaction and confirm the old line/expression disappears.
 - Check 1920x1080 and 2560x1440 on your display. The desktop used for verification clamps large windows to a 1920x1052 client area; true QHD remains a manual display check.
+- Select each chat target, type/send with mouse and Enter, watch recent messages and temporary expressions, and verify wager entry still works. Stop LM Studio mid-request and restart the match; the poker game should continue, old replies should not appear, and the status should switch to fallback.

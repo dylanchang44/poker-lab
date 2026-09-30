@@ -4,6 +4,16 @@ mod ui;
 use bevy::prelude::*;
 
 fn main() {
+    let conversation_config = match std::env::var("POKER_LAB_CONFIG") {
+        Ok(path) => {
+            poker_lab::conversation::ConversationConfig::load(Some(std::path::Path::new(&path)))
+                .unwrap_or_else(|_| {
+                    eprintln!("Conversation configuration invalid; using mock dialogue.");
+                    poker_lab::conversation::ConversationConfig::default()
+                })
+        }
+        Err(_) => poker_lab::conversation::ConversationConfig::default(),
+    };
     let mut args: Vec<_> = std::env::args().skip(1).collect();
     let mode = if let Some(index) = args.iter().position(|arg| arg == "--heads-up") {
         args.remove(index);
@@ -23,6 +33,7 @@ fn main() {
         }
     };
     App::new()
+        .insert_resource(ui::conversation::ConversationSettings(conversation_config))
         .insert_resource(game::MatchSeed(seed))
         .insert_resource(mode)
         .add_plugins(DefaultPlugins.set(WindowPlugin {
