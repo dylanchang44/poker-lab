@@ -84,8 +84,10 @@ pub struct GameSession {
     pub feedback: VecDeque<String>,
     pub conversation_cues: VecDeque<ConversationCue>,
     pub public_winners: VecDeque<String>,
+    pub social_events: VecDeque<(usize, poker_lab::social::PublicSocialEvent)>,
     pub presentation: PresentationState,
     event_cursor: usize,
+    hand_start_stacks: Vec<u32>,
 }
 
 impl GameSession {
@@ -118,7 +120,9 @@ impl GameSession {
             feedback: VecDeque::new(),
             conversation_cues: VecDeque::new(),
             public_winners: VecDeque::new(),
+            social_events: VecDeque::new(),
             event_cursor: 0,
+            hand_start_stacks: Vec::new(),
             presentation: PresentationState {
                 session: id,
                 ..Default::default()
@@ -171,7 +175,31 @@ impl GameSession {
             .enumerate()
         {
             let event_id = self.event_cursor + offset + 1;
+            if let GameEvent::HandStarted { stacks, .. } = event {
+                self.hand_start_stacks = stacks.clone();
+            }
             if let Some(public) = presentation_event(event) {
+                if let PresentationEvent::Settled {
+                    pot,
+                    awards,
+                    shown,
+                    stacks,
+                } = &public
+                {
+                    self.social_events.push_back((
+                        event_id,
+                        poker_lab::social::PublicSocialEvent::Settled {
+                            pot: *pot,
+                            awards: awards.clone(),
+                            shown: shown.clone(),
+                            net: stacks
+                                .iter()
+                                .zip(&self.hand_start_stacks)
+                                .map(|(after, before)| i64::from(*after) - i64::from(*before))
+                                .collect(),
+                        },
+                    ));
+                }
                 self.presentation.apply(&public);
             }
             if let Some(cue) = conversation_cue(event_id, event) {
@@ -220,6 +248,9 @@ impl GameSession {
         }
         while self.conversation_cues.len() > 8 {
             self.conversation_cues.pop_front();
+        }
+        while self.social_events.len() > 8 {
+            self.social_events.pop_front();
         }
     }
 }

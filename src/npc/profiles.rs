@@ -1,4 +1,40 @@
 use crate::poker::Seat;
+use serde::{Deserialize, Serialize};
+
+/// Shared identity for poker, social state and persistence; stable Stage 2 keys.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum NpcId {
+    #[serde(rename = "mira")]
+    Ananya,
+    #[serde(rename = "jax")]
+    Freya,
+    #[serde(rename = "nova")]
+    Yuna,
+}
+impl NpcId {
+    pub const ALL: [Self; 3] = [Self::Ananya, Self::Freya, Self::Yuna];
+    pub fn seat(self) -> Seat {
+        match self {
+            Self::Ananya => Seat::Npc,
+            Self::Freya => Seat::Jax,
+            Self::Yuna => Seat::Nova,
+        }
+    }
+    pub fn from_seat(seat: Seat) -> Option<Self> {
+        Self::ALL.into_iter().find(|n| n.seat() == seat)
+    }
+    pub fn id(self) -> &'static str {
+        profile(self.seat()).id
+    }
+    pub fn name(self) -> &'static str {
+        profile(self.seat()).name
+    }
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|n| n.id() == value || n.name().eq_ignore_ascii_case(value))
+    }
+}
 
 /// Policy modifiers, not independent coin-flip probabilities for every action.
 #[derive(Clone, Copy, Debug, PartialEq)]

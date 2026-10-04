@@ -25,6 +25,7 @@ pub struct ConversationConfig {
     /// 0 disables unsolicited comments; 1 is normal cadence, 2 is talkative.
     pub initiative_frequency: f32,
     pub history_limit: usize,
+    pub max_dialogue_chars: usize,
 }
 impl Default for ConversationConfig {
     fn default() -> Self {
@@ -35,10 +36,11 @@ impl Default for ConversationConfig {
             model: "local-model".into(),
             api_key_env: "POKER_LAB_API_KEY".into(),
             timeout_seconds: 12,
-            max_output_tokens: 120,
+            max_output_tokens: 256,
             temperature: 0.7,
             initiative_frequency: 1.0,
             history_limit: 16,
+            max_dialogue_chars: 180,
         }
     }
 }
@@ -74,6 +76,7 @@ impl ConversationConfig {
             || !(0.0..=2.0).contains(&self.temperature)
             || !(0.0..=3.0).contains(&self.initiative_frequency)
             || !(4..=32).contains(&self.history_limit)
+            || !(80..=360).contains(&self.max_dialogue_chars)
             || !self
                 .api_key_env
                 .chars()

@@ -13,6 +13,31 @@ fn manager() -> ConversationManager {
     manager.reset(11);
     manager
 }
+
+#[test]
+fn private_history_is_excluded_from_other_npcs_and_public_speech() {
+    let mut manager = manager();
+    let context = context(44);
+    assert!(manager.human_message("I enjoy secret chess puzzles", Target::Yuna, context, 0.0));
+    assert!(
+        manager
+            .visible_history(Speaker::Yuna, Audience::Private(NpcId::Yuna))
+            .iter()
+            .any(|m| m.text.contains("secret"))
+    );
+    for speaker in [Speaker::Ananya, Speaker::Freya, Speaker::Yuna] {
+        assert!(
+            manager
+                .visible_history(speaker, Audience::Public)
+                .is_empty()
+        );
+    }
+    assert!(
+        manager
+            .visible_history(Speaker::Freya, Audience::Private(NpcId::Freya))
+            .is_empty()
+    );
+}
 fn await_line(manager: &mut ConversationManager, session: u64, hand: u64) -> DialogueLine {
     for _ in 0..100 {
         if let Some(line) = manager.tick(session, hand) {
@@ -303,6 +328,9 @@ fn missing_remote_key_uses_safe_error_without_network() {
         history: vec![],
         player_text: Some("Hello".into()),
         may_interject: false,
+        audience: Audience::Public,
+        social: SocialContext::default(),
+        mood: MoodState::baseline(NpcId::Freya),
     };
     let response = provider.respond(&request).unwrap_err();
     assert!(response.contains("not configured"));
@@ -343,6 +371,10 @@ fn openai_compatible_adapter_posts_bounded_public_context() {
         let request = String::from_utf8(bytes).unwrap();
         assert!(request.starts_with("POST /v1/chat/completions"));
         assert!(request.contains("Public table snapshot"));
+        assert!(request.contains("Temporary character state"));
+        assert!(request.contains("Stable personality"));
+        assert!(request.contains("Familiarity and trust influence comfort"));
+        assert!(!request.to_lowercase().contains("authorization: bearer"));
         assert!(!request.contains("hole_cards") && !request.contains("CardBurned"));
         let result = serde_json::json!({"choices":[{"message":{"content":"{\"speaker\":\"freya\",\"dialogue\":\"A fine hand.\",\"expression\":\"happy\"}"}}]}).to_string();
         write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", result.len(), result).unwrap();
@@ -361,6 +393,9 @@ fn openai_compatible_adapter_posts_bounded_public_context() {
         history: vec![],
         player_text: Some("Hello".into()),
         may_interject: false,
+        audience: Audience::Public,
+        social: SocialContext::default(),
+        mood: MoodState::baseline(NpcId::Freya),
     };
     let raw = configured_provider(&config).respond(&request).unwrap();
     assert_eq!(
@@ -368,4 +403,182 @@ fn openai_compatible_adapter_posts_bounded_public_context() {
         "A fine hand."
     );
     server.join().unwrap();
+}
+
+#[test]
+fn rich_response_validates_intents_declines_silence_and_metadata() {
+    let raw = r#"{"speaker":"yuna","dialogue":"Maybe another time.","tone":"gentle","social_intent":"decline_invitation","relationship_signal":"warm","conversation_continuation":false}"#;
+    let response = parse_social_response(raw, Speaker::Yuna, 180).unwrap();
+    assert_eq!(response.intent, SocialIntent::DeclineInvitation);
+    assert!(!response.continuation);
+    assert_eq!(response.relationship_signal, RelationshipSignal::Warm);
+    for field in [
+        r#""tone":"obedient""#,
+        r#""social_intent":"change_bet""#,
+        r#""relationship_delta":100"#,
+        r#""conversation_continuation":"yes""#,
+    ] {
+        let raw = format!("{{\"speaker\":\"yuna\",\"dialogue\":\"Hello\",{field}}}");
+        assert_eq!(
+            parse_social_response(&raw, Speaker::Yuna, 180),
+            Err(ResponseError::InvalidMetadata)
+        );
+    }
+    assert!(parse_social_response(r#"{"speaker":"yuna","dialogue":"","silent":true,"expression":null,"conversation_continuation":false}"#,Speaker::Yuna,180).unwrap().silent);
+    let long = serde_json::json!({"speaker":"yuna","dialogue":"a".repeat(210)}).to_string();
+    assert!(parse_social_response(&long, Speaker::Yuna, 240).is_ok());
+    assert_eq!(
+        parse_social_response(&long, Speaker::Yuna, 180),
+        Err(ResponseError::TooLong)
+    );
+}
+
+#[test]
+fn mood_is_private_to_the_recipient_and_resets_without_personality_drift() {
+    let mut manager = manager();
+    let before = system_prompt(Speaker::Yuna);
+    let anya = manager.mood(NpcId::Ananya).clone();
+    for _ in 0..3 {
+        manager.human_message("You're annoying today.", Target::Yuna, context(1), 0.0);
+    }
+    assert_eq!(
+        manager.mood(NpcId::Yuna).mood,
+        crate::social::Mood::Irritated
+    );
+    assert_eq!(*manager.mood(NpcId::Ananya), anya);
+    assert_eq!(
+        manager.queued.as_ref().unwrap().mood.mood,
+        crate::social::Mood::Irritated
+    );
+    manager.reset(99);
+    assert_eq!(*manager.mood(NpcId::Yuna), MoodState::baseline(NpcId::Yuna));
+    assert_eq!(system_prompt(Speaker::Yuna), before);
+    assert_ne!(system_prompt(Speaker::Yuna), system_prompt(Speaker::Freya));
+}
+
+#[test]
+fn initiative_varies_by_character_and_irritation_suppresses_casual_comments() {
+    let mut counts = [0; 3];
+    for event in 1..=60 {
+        for (i, npc) in NpcId::ALL.into_iter().enumerate() {
+            let mut manager = manager();
+            manager.last_event = event;
+            counts[i] +=
+                usize::from(manager.can_initiate(Speaker::from_seat(npc.seat()), 1, 100.0));
+        }
+    }
+    assert!(counts[1] > counts[0] && counts[0] > counts[2]);
+    let mut manager = manager();
+    for _ in 0..4 {
+        manager.human_message("You're annoying", Target::Freya, context(2), 0.0);
+    }
+    assert!(!manager.can_initiate(Speaker::Freya, 1, 100.0));
+}
+
+struct FixedSocialProvider(&'static str);
+impl DialogueProvider for FixedSocialProvider {
+    fn respond(&self, _: &TurnRequest) -> Result<String, String> {
+        Ok(self.0.into())
+    }
+}
+#[test]
+fn silence_and_conversation_end_do_not_spawn_endless_replies() {
+    let mut manager = ConversationManager::new(
+        ConversationConfig::default(),
+        Arc::new(FixedSocialProvider(
+            r#"{"speaker":"freya","dialogue":"","silent":true}"#,
+        )),
+    );
+    manager.reset(11);
+    manager.human_message("Hm.", Target::Freya, context(1), 0.0);
+    for _ in 0..30 {
+        assert!(manager.tick(11, 1).is_none());
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(manager.history.len(), 1);
+    assert!(manager.queued.is_none() && manager.pending.is_none());
+    let mut manager = ConversationManager::new(
+        ConversationConfig::default(),
+        Arc::new(FixedSocialProvider(
+            r#"{"speaker":"freya","dialogue":"I'll leave it there.","social_intent":"end_conversation","conversation_continuation":false}"#,
+        )),
+    );
+    manager.reset(11);
+    manager.human_count = 2;
+    manager.human_message("What do you think?", Target::Table, context(1), 0.0);
+    await_line(&mut manager, 11, 1);
+    assert!(manager.queued.is_none());
+}
+
+#[test]
+fn generated_relationship_hints_cannot_change_authoritative_mood_or_relationships() {
+    let mut manager = manager();
+    let request = manager.request(
+        Speaker::Freya,
+        InteractionType::Reply,
+        context(5),
+        Some("Hello".into()),
+    );
+    let before = manager.moods.clone();
+    let line=manager.deliver(request,Ok(r#"{"speaker":"freya","dialogue":"Maybe. What did you have in mind?","social_intent":"ask_question","relationship_signal":"warm"}"#.into())).unwrap();
+    assert_eq!(line.speaker, Seat::Jax);
+    assert_eq!(manager.moods, before);
+    let fact = crate::memory::ObservedEvent {
+        witnesses: vec![NpcId::Freya],
+        fact: crate::memory::Fact::Conversation {
+            speaker: "freya".into(),
+            audience: Audience::Public,
+            text: "I think your strategy discussion was interesting.".into(),
+        },
+    };
+    assert_eq!(
+        crate::memory::models::derive(NpcId::Freya, &fact)
+            .unwrap()
+            .delta,
+        crate::memory::Relationship::default()
+    );
+}
+
+#[test]
+fn local_outage_uses_fallback_without_credentials() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    let config = ConversationConfig {
+        provider: ProviderKind::Local,
+        base_url: format!("http://{address}/v1"),
+        timeout_seconds: 1,
+        ..Default::default()
+    };
+    let provider = configured_provider(&config);
+    let mut manager = ConversationManager::new(config, provider);
+    manager.reset(11);
+    manager.human_message("Good morning.", Target::Yuna, context(1), 0.0);
+    let line = await_line(&mut manager, 11, 1);
+    assert!(!line.text.is_empty());
+    assert_eq!(manager.status, ProviderStatus::Fallback);
+}
+
+#[test]
+fn side_pot_awards_do_not_hide_a_net_loss_from_social_state() {
+    let mut manager = manager();
+    let before = manager.mood(NpcId::Freya).clone();
+    manager.observe_social(&crate::social::PublicSocialEvent::Settled {
+        pot: 1200,
+        awards: vec![1000, 0, 200, 0],
+        shown: vec![true, false, true, false],
+        net: vec![700, -50, -600, -50],
+    });
+    assert!(manager.mood(NpcId::Freya).confidence < before.confidence);
+    assert!(manager.mood(NpcId::Freya).irritation > before.irritation);
+}
+
+#[test]
+fn public_npc_exchange_has_one_interjection_then_ends() {
+    let mut manager = manager();
+    manager.offer_event(12, Speaker::Freya, 3, context(4), 0.0);
+    assert_eq!(await_line(&mut manager, 11, 1).speaker, Seat::Jax);
+    assert_eq!(await_line(&mut manager, 11, 1).speaker, Seat::Npc);
+    assert!(manager.queued.is_none());
+    assert_eq!(manager.history.len(), 2);
 }

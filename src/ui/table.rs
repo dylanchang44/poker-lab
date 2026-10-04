@@ -87,6 +87,7 @@ pub fn render(
                         }
                         super::characters::spawn_dialogue(table);
                         super::conversation::spawn(table);
+                        super::memory::spawn(table);
                     })
                     .id();
             });

@@ -4,6 +4,9 @@ mod ui;
 use bevy::prelude::*;
 
 fn main() {
+    let memory_path = poker_lab::memory::database_path()
+        .map_err(|error| eprintln!("Memory configuration: {error}; using temporary storage."))
+        .ok();
     let conversation_config = match std::env::var("POKER_LAB_CONFIG") {
         Ok(path) => {
             poker_lab::conversation::ConversationConfig::load(Some(std::path::Path::new(&path)))
@@ -33,6 +36,7 @@ fn main() {
         }
     };
     App::new()
+        .insert_resource(ui::memory::MemorySettings(memory_path))
         .insert_resource(ui::conversation::ConversationSettings(conversation_config))
         .insert_resource(game::MatchSeed(seed))
         .insert_resource(mode)

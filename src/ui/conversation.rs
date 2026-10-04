@@ -27,6 +27,7 @@ pub struct ConversationUi {
     pub target: Target,
     clock: f32,
     event_cursor: usize,
+    social_cursor: usize,
 }
 impl FromWorld for ConversationUi {
     fn from_world(world: &mut World) -> Self {
@@ -34,13 +35,22 @@ impl FromWorld for ConversationUi {
             .get_resource::<ConversationSettings>()
             .map(|r| r.0.clone())
             .unwrap_or_default();
+        let provider = if let Some(memory) = world.get_resource::<super::memory::MemoryUi>() {
+            std::sync::Arc::new(poker_lab::memory::RememberingProvider {
+                inner: configured_provider(&config),
+                memory: memory.service.clone(),
+            }) as std::sync::Arc<dyn poker_lab::conversation::DialogueProvider>
+        } else {
+            configured_provider(&config)
+        };
         Self {
-            manager: ConversationManager::new(config.clone(), configured_provider(&config)),
+            manager: ConversationManager::new(config, provider),
             input: String::new(),
             editing: false,
             target: Target::Table,
             clock: 0.0,
             event_cursor: 0,
+            social_cursor: 0,
         }
     }
 }
@@ -253,10 +263,18 @@ pub fn update(
         let now = chat.clock;
         chat.manager.reset_at(session.presentation.session, now);
         chat.event_cursor = 0;
+        chat.social_cursor = 0;
         chat.input.clear();
         chat.editing = false;
     }
     session.presentation.suppress_samples = chat.manager.enabled();
+    chat.manager.advance(time.delta_secs());
+    for (id, event) in &session.social_events {
+        if *id > chat.social_cursor {
+            chat.manager.observe_social(event);
+            chat.social_cursor = *id;
+        }
+    }
     let view = session.engine.observe(Seat::Human);
     let winners: Vec<_> = session.public_winners.iter().cloned().collect();
     let context = public_context(&view, &winners);
@@ -317,8 +335,13 @@ pub fn render(
                 .map(|m| {
                     let short: String = m.text.chars().take(64).collect();
                     format!(
-                        "{}: {}{}",
+                        "{}{}: {}{}",
                         m.speaker.label(),
+                        if m.audience == poker_lab::memory::Audience::Public {
+                            ""
+                        } else {
+                            " [private]"
+                        },
                         short,
                         if m.text.chars().count() > 64 {
                             "…"
@@ -360,6 +383,17 @@ pub fn render(
         };
     }
     if let Ok(mut value) = status.single_mut() {
-        value.0 = chat.manager.label().into();
+        value.0 = format!(
+            "{}{}",
+            chat.manager
+                .thinking_speaker()
+                .map(|speaker| format!("{} is thinking...", speaker.label()))
+                .unwrap_or_else(|| chat.manager.label().into()),
+            if chat.target == Target::Table {
+                " / public"
+            } else {
+                " / private"
+            }
+        );
     }
 }

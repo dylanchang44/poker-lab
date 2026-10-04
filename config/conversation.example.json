@@ -5,8 +5,9 @@
   "model": "YOUR_LOADED_MODEL_ID",
   "api_key_env": "POKER_LAB_API_KEY",
   "timeout_seconds": 12,
-  "max_output_tokens": 120,
+  "max_output_tokens": 256,
   "temperature": 0.7,
   "initiative_frequency": 1.0,
-  "history_limit": 16
+  "history_limit": 16,
+  "max_dialogue_chars": 180
 }

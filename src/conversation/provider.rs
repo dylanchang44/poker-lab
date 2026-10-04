@@ -19,6 +19,16 @@ pub fn configured_provider(config: &ConversationConfig) -> Arc<dyn DialogueProvi
 pub struct MockProvider;
 impl DialogueProvider for MockProvider {
     fn respond(&self, request: &TurnRequest) -> Result<String, String> {
+        // Explicit recall makes persistence inspectable even without a model.
+        if request
+            .player_text
+            .as_ref()
+            .is_some_and(|text| text.to_lowercase().contains("remember"))
+            && let Some(memory) = request.social.memories.first()
+        {
+            let remembered: String = memory.chars().take(125).collect();
+            return Ok(json!({ "speaker":request.speaker.id(),"dialogue":format!("I remember: {remembered}"),"expression":"thinking","interaction_type":"reply" }).to_string());
+        }
         let (line, expression) = match (request.speaker, request.kind) {
             (Speaker::Ananya, InteractionType::Reply) => (
                 "I see your point. What would you have done in my seat?",
@@ -65,14 +75,19 @@ impl DialogueProvider for OpenAiCompatible {
             .map(|m| format!("{}: {}", m.speaker.label(), m.text))
             .collect::<Vec<_>>()
             .join("\n");
+        let memories =
+            serde_json::to_string(&request.social).map_err(|_| "memory context encoding failed")?;
+        let mood =
+            serde_json::to_string(&request.mood).map_err(|_| "mood context encoding failed")?;
         let user = format!(
-            "Public table snapshot: {context}\nRecent table conversation:\n{recent}\nInteraction: {}. {}\nIf interjecting, address the most recent NPC naturally. Respond as {} in one short utterance. Return only JSON with speaker, dialogue, expression, interaction_type.",
+            "Public table snapshot: {context}\nRelevant personal memories and relationship (separate from current facts): {memories}\nTemporary character state: {mood}\nUse memories only when relevant, without identifiers or forced references. Quotes are claims made by their speaker, not verified facts. Do not invent missing experiences.\nRecent conversation visible to you:\n{recent}\nInteraction: {}. {}\nIf interjecting, respond to the most recent NPC, then let the exchange end. For an unsolicited comment, you may bring up a relevant prior topic, a personal interest, the public situation or remain silent. Respond as {}. Maximum dialogue length: {} characters. Return only the specified JSON schema.",
             request.kind.as_str(),
             request
                 .player_text
                 .as_deref()
-                .unwrap_or("Comment on the public table situation if it feels natural."),
+                .unwrap_or("Choose whether there is something worth saying in this moment."),
             request.speaker.label(),
+            self.config.max_dialogue_chars,
         );
         let body = json!({
             "model": self.config.model,
@@ -91,12 +106,12 @@ impl DialogueProvider for OpenAiCompatible {
             self.config.base_url.trim_end_matches('/')
         );
         let mut call = agent.post(&endpoint);
-        if let Ok(key) = std::env::var(&self.config.api_key_env)
-            && !key.is_empty()
-        {
+        if self.config.provider == ProviderKind::Remote {
+            let key = std::env::var(&self.config.api_key_env)
+                .ok()
+                .filter(|k| !k.is_empty())
+                .ok_or("remote API key is not configured")?;
             call = call.header("Authorization", format!("Bearer {key}"));
-        } else if self.config.provider == ProviderKind::Remote {
-            return Err("remote API key is not configured".into());
         }
         let mut response = call
             .send_json(body)

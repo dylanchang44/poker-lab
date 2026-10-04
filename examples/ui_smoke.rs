@@ -27,6 +27,10 @@ struct Progress {
 
 fn main() {
     App::new()
+        // Explicit opt-in: ordinary smoke checks never touch the user's database.
+        .insert_resource(ui::memory::MemorySettings(
+            std::env::var_os("POKER_LAB_SMOKE_DB").map(std::path::PathBuf::from),
+        ))
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Poker Lab UI check".into(),
@@ -185,7 +189,7 @@ fn drive(world: &mut World) {
         }
         5 => {
             assert!(world.resource::<ui::conversation::ConversationUi>().editing);
-            type_chat(world, "Hello, Ananya");
+            type_chat(world, "I enjoy strategy games");
         }
         6 => {
             let chat = world.resource::<ui::conversation::ConversationUi>();
@@ -193,7 +197,7 @@ fn drive(world: &mut World) {
                 chat.manager
                     .history()
                     .iter()
-                    .any(|m| m.text == "Hello, Ananya")
+                    .any(|m| m.text == "I enjoy strategy games")
             );
             if !chat
                 .manager
@@ -262,9 +266,45 @@ fn drive(world: &mut World) {
             capture(world, "next-hand");
         }
         12 => {
-            click(world, "New Match");
+            click(world, "Memories");
         }
         13 => {
+            let service = &world.resource::<ui::memory::MemoryUi>().service;
+            assert!(service.flush());
+            let snapshot = service.snapshot();
+            let anya = &snapshot.characters[0];
+            assert!(
+                anya.memories
+                    .iter()
+                    .any(|m| m.summary.contains("strategy games"))
+            );
+            assert!(snapshot.characters[1..].iter().all(|c| {
+                !c.memories
+                    .iter()
+                    .any(|m| m.summary.contains("strategy games"))
+            }));
+            if std::env::args().any(|a| a == "--restored") {
+                assert!(
+                    anya.sessions >= 3,
+                    "prior application sessions must be restored"
+                );
+                assert!(
+                    anya.memories
+                        .iter()
+                        .any(|m| m.summary.contains("strategy games") && m.occurrences >= 2)
+                );
+            }
+            capture(world, "memory");
+            click(world, "Next character");
+        }
+        14 => {
+            capture(world, "memory-freya");
+            click(world, "Close memories");
+        }
+        15 => {
+            click(world, "New Match");
+        }
+        16 => {
             assert_eq!(
                 world
                     .resource::<game::GameSession>()

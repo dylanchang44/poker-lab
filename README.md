@@ -1,6 +1,6 @@
 # Poker Lab
 
-A native Linux Texas Hold'em game built with Rust and Bevy. Stage 4 adds optional local or remote LLM conversations with **Ananya (The Analyst)**, **Freya (The Gambler)**, and **Yuna (The Observer)**. Their poker strategies remain unchanged. Each starts with 1,000 virtual chips; blinds stay at 5/10. Play until one player holds all 4,000 chips.
+A native Linux Texas Hold'em game built with Rust and Bevy. Stage 6 adds stable conversational personalities, temporary moods, personal boundaries, richer social replies and bounded initiative for **Ananya (The Analyst)**, **Freya (The Gambler)**, and **Yuna (The Observer)**. Stage 5 memories and relationships persist locally. Their poker strategies remain unchanged. Each starts with 1,000 virtual chips; blinds stay at 5/10. Play until one player holds all 4,000 chips.
 
 ## Requirements
 
@@ -8,7 +8,7 @@ Developed on CachyOS/Arch Linux with Rust/Cargo 1.94.1 stable, Bevy **0.18.1**, 
 
 You need Rust/Cargo, a C compiler/linker, pkg-config, a working desktop, and a Vulkan-capable GPU/driver. On Arch, inspect availability of base-devel, pkgconf, wayland, libxkbcommon, libx11, libxcb, vulkan-icd-loader, and your GPU driver; only install missing packages. `vulkaninfo --summary` can check graphics support. Original generated portrait PNGs are in assets/characters. No LLM installation or API key is needed for the default mock mode or to play poker.
 
-The first Bevy build may take several minutes and several GB. Subsequent builds are incremental.
+Stage 5 also requires SQLite development headers/libraries (`sqlite` on Arch). The pinned `rusqlite = 0.38.0` uses system SQLite, without an ORM or bundled database server. The first Bevy build may take several minutes and several GB. Subsequent builds are incremental.
 
 ## Run, build and test
 
@@ -51,13 +51,57 @@ The batch runner opens no window and waits for no thinking timers. Release mode 
 
 ### Conversation configuration
 
+LM Studio is the preferred real inference provider for development. It requires no remote credentials. Without a configured local model, mock mode and provider-failure fallback keep the game playable. The remote adapter remains available for later configuration. No OpenAI key is needed for Stage 6.
+
 Without `POKER_LAB_CONFIG`, a deterministic mock provider gives short test dialogue. Poker remains fully playable if a configured provider is down: a short preset line replaces a failed response, while the small status label says **Dialogue fallback**. Set `"enabled": false` to disable generated conversation and retain Stage 3's preset public-event lines.
 
 For a local model, use [the example config](config/conversation.example.json): load a chat-tuned model in LM Studio, enable its local server in the Developer tab, and replace `YOUR_LOADED_MODEL_ID` with the identifier shown by LM Studio. Its OpenAI-compatible base URL is normally `http://127.0.0.1:1234/v1`; the app posts to `/chat/completions`. LM Studio documents [server startup](https://lmstudio.ai/docs/developer/openai-compat/tools), [chat completions](https://lmstudio.ai/docs/developer/openai-compat/chat-completions), and [model listing](https://lmstudio.ai/docs/developer/openai-compat/models). Copy the example to a local file if you want to preserve it while editing.
 
 For a remote OpenAI-compatible service, set `"provider": "remote"`, an **HTTPS** `"base_url"` ending at the API version (for example `https://api.openai.com/v1`), and a supported `"model"`. Set `"api_key_env": "POKER_LAB_API_KEY"`, then export that variable in your shell without writing the key into the config or repository. The adapter uses the [Chat Completions API](https://developers.openai.com/api/reference/resources/chat), not poker-action tools. A remote provider with no key falls back safely. The endpoint must support compatible `messages`, `model`, `temperature`, `max_tokens`, and non-streaming responses. Models vary in JSON reliability; all responses are locally validated.
 
-Other settings: `timeout_seconds` (1–120), `max_output_tokens` (16–1024), `temperature` (0–2), `initiative_frequency` (0–3, with 0 disabling unsolicited speech), and `history_limit` (4–32 messages). The history is in memory for the current match only; no API key or chat transcript is saved. A turn sends at most the recent bounded dialogue and a concise public table snapshot. A slow call runs in a worker and never pauses betting/rendering.
+Other settings: `timeout_seconds` (1–120), `max_output_tokens` (16–1024), `temperature` (0–2), `initiative_frequency` (0–3, with 0 disabling unsolicited speech), and `history_limit` (4–32 messages). Recent history is bounded in memory. Stage 5 saves selected meaningful quotes, not an unlimited transcript; API keys are never saved. A turn sends bounded permitted dialogue, a concise public table snapshot, up to three relevant memories, and relationship context. A slow call runs in a worker and never pauses betting/rendering.
+
+Stage 6 adds `max_dialogue_chars` (80–360, default 180). The default output token budget is now 256 to accommodate the richer JSON response. Character prompts include stable preferences/boundaries, current mood, relationship context, relevant memories and recent conversation. Ordinary conversation is interpreted by the local model; no phrase-to-reply table drives real inference. Characters may disagree, decline, ask questions, end an exchange or choose silence. They are fictional characters and do not have a real off-screen life or make real appointments.
+
+Mood changes gradually from public net poker results and conservatively recognized social cues. It persists across hands, recovers toward the character's baseline during play, and resets for a new match. Persistent relationships and memories survive that reset. A mood word appears beneath idle portraits; thinking and temporary expression reactions take precedence. The optional Memories inspector is a debug view with numeric state, separate from ordinary table feedback.
+
+```sh
+# Deterministic, window-free conversation plumbing check; uses isolated temporary memory:
+cargo run --example social_probe
+# Audition the same seven acceptance scenarios against a loaded LM Studio model:
+POKER_LAB_CONFIG=config/conversation.example.json cargo run --example social_probe
+```
+
+The mock is deliberately a test fixture, not a substitute language model. It cannot demonstrate nuanced acceptance/decline behavior or natural ordinary conversation. See [Stage 6 design, schema and verification](docs/stage6-verification.md) for what was tested and the remaining live-model checklist.
+
+### Persistent memories and relationships
+
+Click **Memories** near the upper-left of the table; **Next character** cycles profiles. The panel shows stored memories, relationship dimensions, hands/sessions together, and save status. A session means one match visit (Start Game/New Match), not time spent in the menu. New Match resets chips and short-term chat, but preserves social memory.
+
+**Everyone** is public. Addressing Ananya, Freya, or Yuna is now a **private exchange**. Other characters do not receive those messages or memories. Even the owner does not receive private history/memories when generating a public table comment. Your transcript and inspector can display your own private exchanges. Privacy here is an NPC information boundary, not encryption against other users of your computer. A configured remote provider receives the selected context for its request, including your private messages to that character.
+
+Default database: `$XDG_DATA_HOME/poker-lab/poker_lab.db`, otherwise `~/.local/share/poker-lab/poker_lab.db`. Override with `POKER_LAB_DB=/absolute/path/social.db`. `POKER_LAB_PROFILE=alice` selects a separate `poker-lab/profiles/alice/poker_lab.db`; profile names allow letters, digits, `_` and `-`. An explicit DB path takes precedence. No account or server is required.
+
+```sh
+# Inspect local profiles without launching graphics:
+cargo run --example social -- inspect
+# Close the game first. These intentional resets require --confirm:
+cargo run --example social -- reset Yuna --confirm
+cargo run --example social -- reset all --confirm
+cargo run --example social -- reset-relationships all --confirm
+# Separate fresh social history, without deleting the original:
+POKER_LAB_PROFILE=fresh_test cargo run
+```
+
+Reset removes derived memories/relationship state (or just relationships), not retained source events and session summaries. Old events are not replayed to regenerate reset memories. Use a fresh profile for fully separate history. Back up the database with the game closed; it can have associated `-wal`/`-shm` files while open. There is no poker-hand save/resume.
+
+Memories are deterministic, attributed observations: notable pots/eliminations, directly stated preferences, meaningful quotes, milestones, and conservative preflop observations. High-card river aggression after public showdown is recorded as an observation, **not proof of bluff intent**. Repeated quotes consolidate; routine folds and greetings do not become permanent memories. Each character retains at most 96 memories. Retrieval ranks topic overlap, importance and recency, supplies at most three 240-character excerpts, and suppresses repeats for two minutes. Older raw records are pruned except sources still supporting retained memories. No vectors, training or LLM extraction is required.
+
+Five integer relationship dimensions range from 0–1000. Sessions add 5 familiarity; hands add 1; meaningful social events typically add 1–3, and public poker confrontations add small respect/tension changes. Repeated identical quotes do not repeatedly reward relationships. Ananya values thoughtful discussion; Freya's banter/rivalry modifiers differ from Yuna's gradual warmth. Labels such as Friend or Respected Rival are derived views, not authoritative state. LLM-generated claims cannot change scores or invent authoritative poker facts.
+
+Writes use transactions, foreign keys, WAL and a schema version. SQLite runs on one worker, with a bounded queue and retry journal; unavailable storage falls back to temporary memory and periodically retries. A long outage or queue overflow can lose unsaved social observations; the inspector reports a save problem and poker continues. Normal exit drains queued work with a bounded wait. Already committed data survives abrupt exit; pending work might not.
+
+For mock-only recall, privately say `I enjoy strategy games`, quit normally, reopen, then ask that character `Remember strategy games?`. The mock can quote a selected memory; natural recollection wording requires a configured language model. No memory mention is forced into every response.
 
 D/SB/BB identify the button and blinds. A dead button can remain at an eliminated seat for one hand; sometimes there is no small blind. The engine switches to heads-up blind/action rules with two survivors.
 
@@ -68,9 +112,16 @@ The pot includes chips shown as “In front.” Side-pot layers shown during all
 ```text
 src/main.rs              Window, plugins, seed/practice arguments
 src/lib.rs               Rendering-independent poker/NPC API
+src/social/mod.rs        Stable speech profiles, conservative intent cues, mood and recovery
+src/memory/
+  models.rs              Audiences, facts, memories, relationships, deterministic extraction
+  observation.rs         Public-only poker event adapter
+  repository.rs          SQLite migrations, transactions, retention, retrieval, summaries
+  mod.rs, tests.rs        Bounded storage worker, provider enrichment, persistence/privacy tests
 src/conversation/
   config.rs              Provider settings and safe validation
   provider.rs            OpenAI-compatible HTTP and deterministic mock adapters
+  response.rs            Validated social metadata, silence and expression hints
   mod.rs, tests.rs        Shared history, safe context, routing, validation, worker
 src/poker/
   cards.rs, deck.rs       Cards and seeded ChaCha8 shuffle
@@ -101,6 +152,9 @@ src/ui/
   controls.rs            Button commands and numeric entry
   characters.rs          Cached portraits, persistent entities, animation/dialogue
   conversation.rs        Table Talk input, target selector, transcript/status, Bevy bridge
+  memory.rs              Observation capture, session lifecycle, memory/profile overlay
+examples/social.rs       Headless social inspection and deliberate reset CLI
+examples/social_probe.rs Local/mock conversation acceptance-scenario runner
 examples/batch.rs         Personality batch CLI
 examples/simulate.rs      Original heads-up simulation
 examples/ui_smoke.rs      Rendered interaction check and screenshots
@@ -170,7 +224,7 @@ See [the character asset guide](assets/characters/README.md) for the seven-expre
 
 See [Stage 4 verification](docs/stage4-verification.md), [Stage 3 verification](docs/stage3-verification.md), and [Stage 2 verification](docs/stage2-verification.md). VPIP/PFR/showdown/pot-win are per dealt hand; aggression/fold are per decision. Chips/hand counts commitments after refunds, including blinds. “Pot win” includes any shared or side-pot award; net chips and match wins are also reported. Seats rotate between matches to reduce fixed-seat bias. A cap reports incomplete matches rather than treating them as wins.
 
-These are behavior diagnostics, not strength rankings. Uniform opponent ranges, small equity samples and a fixed heuristic policy are intentional limitations; there is no opponent learning or GTO solver. Other limits: fixed blinds, two/four-seat selectable configurations, generated portrait atlases, simple motion, instantaneous runouts, in-memory event history and no save/resume. Chat is short-text only, one visible recent-history panel, no streaming tokens, no cross-session memory, no model-driven bets and no moderation service. The mock dialogue is intentionally simple; natural conversation requires a suitable configured model.
+These are behavior diagnostics, not strength rankings. Uniform opponent ranges, small equity samples and a fixed heuristic policy are intentional limitations; there is no opponent learning or GTO solver. Other limits: fixed blinds, two/four-seat selectable configurations, generated portrait atlases, simple motion, instantaneous runouts, in-memory full replay history and no poker save/resume. Chat is short-text only, one visible recent-history panel, no streaming tokens, no model-driven bets and no moderation service. The mock dialogue is intentionally simple; natural conversation requires a suitable configured model. See [Stage 5 design and verification](docs/stage5-verification.md) for the persistence schema and restart/privacy checklist.
 
 ### Manual GUI checklist
 

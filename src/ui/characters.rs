@@ -255,9 +255,9 @@ pub fn spawn_dialogue(parent: &mut ChildSpawnerCommands) {
                 position_type: PositionType::Absolute,
                 left: Val::Percent(50.0),
                 margin: UiRect::left(Val::Px(-285.0)),
-                top: Val::Px(650.0),
+                bottom: Val::Px(246.0),
                 width: Val::Px(570.0),
-                height: Val::Px(64.0),
+                min_height: Val::Px(64.0),
                 padding: UiRect::axes(Val::Px(12.0), Val::Px(4.0)),
                 border: UiRect::left(Val::Px(2.0)),
                 border_radius: BorderRadius::all(Val::Px(8.0)),
@@ -281,6 +281,11 @@ pub fn spawn_dialogue(parent: &mut ChildSpawnerCommands) {
             ));
             panel.spawn((
                 DialogueText,
+                Node {
+                    min_width: Val::Px(0.0),
+                    flex_shrink: 1.0,
+                    ..default()
+                },
                 Text::new(""),
                 TextFont {
                     font_size: 16.0,
@@ -406,6 +411,7 @@ pub fn sync_readouts(
 #[allow(clippy::too_many_arguments)] // Disjoint ECS queries keep animation read-only on gameplay.
 pub fn animate(
     session: Res<GameSession>,
+    chat: Option<Res<super::conversation::ConversationUi>>,
     animation: Res<CharacterAnimation>,
     assets: Res<PortraitAssets>,
     images: Option<Res<Assets<Image>>>,
@@ -483,8 +489,18 @@ pub fn animate(
         let state = &session.presentation.seats[readout.seat.index()];
         match readout.field {
             Readout::Expression => {
-                if text.0 != state.expression.label() {
-                    text.0 = state.expression.label().into();
+                let caption = if state.eliminated || state.active || state.reaction_left > 0.0 {
+                    state.expression.label()
+                } else {
+                    chat.as_ref()
+                        .and_then(|chat| {
+                            poker_lab::memory::NpcId::from_seat(readout.seat)
+                                .map(|npc| chat.manager.mood(npc).mood.label())
+                        })
+                        .unwrap_or(state.expression.label())
+                };
+                if text.0 != caption {
+                    text.0 = caption.into();
                 }
             }
             Readout::Action => {

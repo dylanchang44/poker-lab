@@ -4,6 +4,7 @@ use crate::game::AppState;
 pub mod characters;
 mod controls;
 pub mod conversation;
+pub mod memory;
 mod table;
 
 const BACKGROUND: Color = Color::srgb(0.035, 0.05, 0.08);
@@ -25,6 +26,7 @@ impl Plugin for UiPlugin {
             .init_resource::<crate::game::NpcSettings>()
             .init_resource::<characters::PortraitAssets>()
             .init_resource::<characters::CharacterAnimation>()
+            .init_resource::<memory::MemoryUi>()
             .init_resource::<conversation::ConversationUi>()
             .init_resource::<UiScale>()
             .add_message::<characters::DialogueRequest>()
@@ -34,8 +36,9 @@ impl Plugin for UiPlugin {
             .add_systems(OnEnter(AppState::InGame), crate::game::start_match)
             .add_systems(
                 OnExit(AppState::InGame),
-                (despawn_screen, crate::game::end_match),
+                (memory::finish, despawn_screen, crate::game::end_match).chain(),
             )
+            .add_systems(Last, memory::shutdown)
             .add_systems(Update, button_interactions)
             .add_systems(
                 Update,
@@ -47,17 +50,21 @@ impl Plugin for UiPlugin {
                 (
                     (
                         controls::buttons,
+                        memory::buttons,
                         conversation::buttons,
                         controls::keyboard,
                         conversation::keyboard,
                         crate::game::npc_turn,
+                        memory::capture,
                         conversation::update,
+                        memory::capture_dialogue,
                         characters::tick,
                     )
                         .chain(),
                     (
                         table::render,
                         conversation::render,
+                        memory::render,
                         characters::sync_readouts,
                         characters::animate,
                         characters::dialogue,
