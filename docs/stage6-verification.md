@@ -40,11 +40,13 @@ The host has one provider worker and one queued request. Existing session/hand g
 
 The table shows the pending speaker's thinking indicator and an idle mood word without numeric scores. Existing action, thinking, elimination and temporary expression displays take precedence. Dialogue duration follows length, and the bubble can wrap taller replies. Numeric relationship values remain in the optional debug inspector.
 
-The example config selects local inference at `http://127.0.0.1:1234/v1`; set its model identifier to a model loaded in LM Studio. `max_dialogue_chars` defaults to 180 and accepts 80–360. `max_output_tokens` defaults to 256. All other provider settings remain available. With no config, the deterministic mock is used. An unavailable local endpoint yields a short fallback and never blocks gameplay.
+The desktop now selects `POKER_LAB_CONFIG`, then `config/conversation.json`, then a local-development preset. That preset discovers the one loaded LM Studio chat model, requests JSON-schema output, disables reasoning with `reasoning_effort: "none"`, and uses 512 output tokens, 240 dialogue characters and a 60-second deadline. Explicit remote configurations retain optional compatibility controls. Mock remains the deterministic default for tests, not normal desktop startup. See the README for startup and overrides.
+
+Replies carry host-assigned provenance. Mock/preset text is labelled `[scripted]`, and failures `[scripted fallback]` with a safe status reason. A connection is not shown as verified until a valid reply arrives. Synthetic NPC lines are excluded from subsequent model context and new social memories; human messages still work with offline memory. Poker strategy and rules are unchanged.
 
 ## Verification and acceptance
 
-Executed October 4, 2026:
+Initial verification, October 4, 2026 (before the local-inference correction below):
 
 - `cargo check --all-targets`, `cargo fmt --check`, and `cargo clippy --all-targets -- -D warnings`: passed.
 - `cargo test`: **90 passed** (79 library, 11 application). All 77 Stage 5 tests remain. Added coverage includes gradual mood/recovery, profile stability, private mood recipients, side-pot net losses, character initiative, social schema/declines/silence, bounded NPC interjections, deterministic relationship authority, context enrichment and local outage fallback. Existing tests still cover stale workers and hidden-information boundaries.
@@ -67,8 +69,23 @@ For live acceptance, load a local model, run the game with the example config, a
 7. Allow quiet time and public poker events. Check occasional initiative, at most one NPC interjection, and natural termination.
 8. Stop LM Studio during a turn, restart a match during inference, and continue poker actions. Check fallback, responsiveness and stale-response rejection.
 
-`cargo run --example social_probe` runs the first seven messages for all three characters without graphics or a real save file. Set `POKER_LAB_CONFIG` to use local inference. It refuses remote mode. This is an audition aid; its mock results test routing and schema plumbing only.
+`cargo run --example social_probe` tests eleven messages per NPC without graphics or a real save file: the original seven plus music, stated musical preference, short-term recall and fatigue. It defaults to mock. Add `-- --require-model` to select the desktop local configuration and fail on scripted, missing or silent replies. It refuses remote mode. This checks real inference, not semantic quality; review the actual dialogue too. `cargo run --example ui_smoke -- --local` separately requires a model-generated reply through Bevy input and presentation, with temporary memory.
 
 ## Stage 7
 
 Adaptive poker can remain a separate versioned opponent model built from legitimately observed gameplay, evaluated through seeded simulations and passed through the existing strategy interface. Social mood, relationship scores and generated claims must not become authoritative betting evidence. The poker engine and its legal-action validation need no conversation dependency.
+
+## Local-inference correction — October 5, 2026
+
+The reported scripted-reply problem was real: the original desktop default selected Mock. A direct Qwen3.5 9B request also returned empty content with `finish_reason: "length"` and all 128 generated tokens spent on reasoning. The fix separates explicit test/mock defaults from desktop local defaults, adds loaded-model discovery and configurable reasoning/JSON-schema controls, and labels the origin of every synthetic reply. No model downloads, new dependencies, remote credentials, poker-rule changes or strategy changes were required.
+
+Executed against the correction:
+
+- `cargo build`, `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test`: passed. **94 tests** (83 library + 11 application), including configuration precedence, loaded-only discovery, output-budget failure handling, host-owned provenance and connection reset. The HTTP fixture checks that the latest player message, schema and reasoning option are sent without credentials or scripted history.
+- `cargo run`: created a Poker Lab window using AMD RX 7700 XT Vulkan with a disposable database. The launch check was intentionally interrupted by an 8-second timeout (exit 124), not a normal application-exit test. An earlier 8-second attempt expired during compilation; it was not counted as a successful launch.
+- `cargo run --example ui_smoke -- --small --local`: passed. A real Gemma 4 12B QAT reply reached Bevy's chat history/presentation, followed by betting, hand completion, next hand, memory inspection, restart and menu return. No real player database was used.
+- `cargo run --example ui_smoke -- --small`: passed with deterministic mock input. Screenshots of both modes were inspected at 1000×820 logical / 1250×1025 physical: local connection status and scripted bubble/history badges were visible, with poker controls readable.
+- Qwen3.5 9B completed the original 21-message probe with 21 model replies and zero fallbacks after the protocol correction, but review found excessive poker deflection and invented details. This is a transport success, not a full dialogue-quality pass. The already-installed Gemma 4 12B QAT model was then auditioned; models were loaded one at a time.
+- `cargo run --example social_probe -- --require-model`: passed with Gemma 4 12B QAT, **33 model-generated replies, zero scripted/silent/missing replies**. All three answered the music question, recalled the stated jazz preference and responded to the request to discuss fatigue instead of poker. Invitations produced hesitation or refusal rather than automatic agreement; criticism/apology exchanges varied by character. Missing-yesterday-memory questions produced uncertainty, though some wording inferred too much from absent records. This was human review of actual generated output from the headless harness, not a claim of flawless conversational quality or a manual GUI playthrough. The local diagnostic transcript is `/tmp/poker-lab-live-dialogue-verification.log` (temporary, not a saved player transcript).
+
+Known limitations: JSON/schema validation cannot prove factual accuracy or naturalness. Even Gemma can overuse poker references, make unsupported inferences, or sound stiff. Missing retrieved memories must not be interpreted as proof that an interaction never happened. Full long-term relationship-quality acceptance and live outage/restart stress testing remain broader follow-up work; deterministic outage and stale-response tests still pass. No LLM is allowed to change poker or authoritative relationship values.

@@ -90,6 +90,14 @@ pub fn capture_dialogue(
         4
     };
     for message in chat.manager.drain_observed() {
+        // Outage fixtures are not meaningful character experiences. Human
+        // messages still form memories offline, preserving mock recall tests.
+        if message
+            .source
+            .is_some_and(|s| s != poker_lab::characters::DialogueSource::Model)
+        {
+            continue;
+        }
         if conversation_kind(message.speaker.id(), &message.text).is_none() {
             continue;
         }

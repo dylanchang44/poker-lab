@@ -538,9 +538,10 @@ pub fn dialogue(
     if let Some(line) = &state.dialogue {
         for (mut text, mut color) in &mut text {
             // Update text only when the line changes, not once per frame.
-            let prefix = display_name(line.speaker);
-            if !text.0.starts_with(prefix) || !text.0.ends_with(&line.text) {
-                text.0 = format!("{prefix}: {}", line.text);
+            let prefix = format!("{}{}", display_name(line.speaker), line.source.badge());
+            let rendered = format!("{prefix}: {}", line.text);
+            if text.0 != rendered {
+                text.0 = rendered;
             }
             color.0 = TEXT.with_alpha(state.dialogue_left.min(1.0));
         }

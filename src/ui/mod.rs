@@ -366,6 +366,7 @@ mod tests {
             text: "Old hand".into(),
             expression: Some(CharacterExpression::Happy),
             duration: 10.0,
+            source: poker_lab::characters::DialogueSource::Scripted,
         };
         app.world_mut()
             .write_message(characters::DialogueRequest(old.clone()));

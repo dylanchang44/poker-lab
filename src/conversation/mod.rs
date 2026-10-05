@@ -2,12 +2,12 @@
 mod config;
 mod provider;
 mod response;
-pub use config::{ConversationConfig, ProviderKind};
+pub use config::{ConversationConfig, ProviderKind, ReasoningEffort};
 pub use provider::{DialogueProvider, MockProvider, configured_provider};
 pub use response::{RelationshipSignal, SocialIntent, SocialResponse, Tone, parse_social_response};
 
 use crate::{
-    characters::{CharacterExpression, DialogueLine},
+    characters::{CharacterExpression, DialogueLine, DialogueSource},
     memory::{Audience, NpcId, SocialContext},
     npc::profiles::display_name,
     poker::{Observation, Seat, state::PublicAction},
@@ -121,6 +121,8 @@ pub struct ChatMessage {
     pub speaker: Speaker,
     pub text: String,
     pub audience: Audience,
+    /// None for human input; assigned by the host, never by model metadata.
+    pub source: Option<DialogueSource>,
 }
 
 /// Whitelist only public fields. Never serialize Observation or GameEvent wholesale.
@@ -294,6 +296,7 @@ impl Drop for WorkerGuard {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProviderStatus {
     Mock,
+    Unverified,
     Ready,
     Working,
     Fallback,
@@ -316,6 +319,8 @@ pub struct ConversationManager {
     human_count: u64,
     last_line: [String; 4],
     pub status: ProviderStatus,
+    verified: bool,
+    failure_hint: &'static str,
     moods: [MoodState; 3],
 }
 impl ConversationManager {
@@ -325,7 +330,7 @@ impl ConversationManager {
         } else if config.provider == ProviderKind::Mock {
             ProviderStatus::Mock
         } else {
-            ProviderStatus::Ready
+            ProviderStatus::Unverified
         };
         Self {
             config,
@@ -342,6 +347,8 @@ impl ConversationManager {
             human_count: 0,
             last_line: std::array::from_fn(|_| String::new()),
             status,
+            verified: false,
+            failure_hint: "Scripted fallback: invalid reply",
             moods: NpcId::ALL.map(MoodState::baseline),
         }
     }
@@ -357,12 +364,14 @@ impl ConversationManager {
         self.event_sequence = 0;
         self.human_count = 0;
         self.last_line = std::array::from_fn(|_| String::new());
+        self.verified = false;
+        self.failure_hint = "Scripted fallback: invalid reply";
         self.status = if !self.config.enabled {
             ProviderStatus::Disabled
         } else if self.config.provider == ProviderKind::Mock {
             ProviderStatus::Mock
         } else {
-            ProviderStatus::Ready
+            ProviderStatus::Unverified
         };
     }
     /// A new graphical match starts quietly; the opening cue can speak after a brief pause.
@@ -413,10 +422,14 @@ impl ConversationManager {
     }
     pub fn label(&self) -> &'static str {
         match self.status {
-            ProviderStatus::Mock => "Mock dialogue",
-            ProviderStatus::Ready => "Dialogue online",
+            ProviderStatus::Mock => "Scripted mock (no model)",
+            ProviderStatus::Unverified => "Model not yet verified",
+            ProviderStatus::Ready if self.config.provider == ProviderKind::Local => {
+                "Local model connected"
+            }
+            ProviderStatus::Ready => "Remote model connected",
             ProviderStatus::Working => "Thinking...",
-            ProviderStatus::Fallback => "Dialogue fallback",
+            ProviderStatus::Fallback => self.failure_hint,
             ProviderStatus::Disabled => "Dialogue off",
         }
     }
@@ -482,6 +495,7 @@ impl ConversationManager {
             speaker: Speaker::Human,
             text: text.into(),
             audience,
+            source: None,
         });
         let speaker = target.speaker().unwrap_or_else(|| {
             if context.stacks.len() == 2 {
@@ -631,15 +645,31 @@ impl ConversationManager {
         {
             return None;
         }
-        let (text, expression, fallback, continuation) = match result.and_then(|s| {
+        let parsed = result.and_then(|s| {
             parse_social_response(&s, request.speaker, self.config.max_dialogue_chars)
                 .map_err(|e| format!("{e:?}"))
-        }) {
+        });
+        // Only fixed diagnostic categories reach the UI. No raw provider bodies,
+        // prompts, URLs, credentials or model reasoning are logged/displayed.
+        self.failure_hint = match parsed.as_ref().err().map(String::as_str) {
+            Some(e) if e.contains("timeout") || e.contains("timed out") => {
+                "Scripted fallback: timed out"
+            }
+            Some(e) if e.contains("no loaded") => "Scripted fallback: load a model",
+            Some(e) if e.contains("multiple loaded") => "Scripted fallback: select a model",
+            Some(e) if e.contains("token limit") => "Scripted fallback: token limit",
+            Some(e) if e.contains("network") => "Scripted fallback: server offline",
+            Some(e) if e.contains("HTTP status") => "Scripted fallback: API rejected request",
+            Some(_) => "Scripted fallback: invalid reply",
+            None => "Scripted fallback: repeated reply",
+        };
+        let (text, expression, fallback, continuation) = match parsed {
             Ok(response)
                 if response.silent
                     || response.dialogue
                         != self.last_line[request.speaker.seat().unwrap().index()] =>
             {
+                self.verified = self.config.provider != ProviderKind::Mock;
                 if response.silent {
                     self.status = if self.config.provider == ProviderKind::Mock {
                         ProviderStatus::Mock
@@ -666,11 +696,19 @@ impl ConversationManager {
             ProviderStatus::Ready
         };
         let speaker = request.speaker;
+        let source = if fallback {
+            DialogueSource::Fallback
+        } else if self.config.provider == ProviderKind::Mock {
+            DialogueSource::Scripted
+        } else {
+            DialogueSource::Model
+        };
         self.last_line[speaker.seat().unwrap().index()] = text.clone();
         self.push(ChatMessage {
             speaker,
             text: text.clone(),
             audience: request.audience,
+            source: Some(source),
         });
         if request.may_interject && continuation && !fallback && self.queued.is_none() {
             let next = match speaker {
@@ -689,6 +727,7 @@ impl ConversationManager {
             text,
             expression,
             duration,
+            source,
         })
     }
     pub fn tick(&mut self, current_session: u64, hand: u64) -> Option<DialogueLine> {
@@ -753,8 +792,10 @@ impl ConversationManager {
         {
             self.status = if self.config.provider == ProviderKind::Mock {
                 ProviderStatus::Mock
-            } else {
+            } else if self.verified {
                 ProviderStatus::Ready
+            } else {
+                ProviderStatus::Unverified
             };
         }
         None

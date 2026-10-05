@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{fs, path::Path, time::Duration};
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -8,6 +8,18 @@ pub enum ProviderKind {
     Mock,
     Local,
     Remote,
+}
+
+/// Optional OpenAI-compatible hint. `None` omits the parameter for providers
+/// that do not support it; `Off` serializes to the API value "none".
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningEffort {
+    #[serde(rename = "none")]
+    Off,
+    Low,
+    Medium,
+    High,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -26,6 +38,8 @@ pub struct ConversationConfig {
     pub initiative_frequency: f32,
     pub history_limit: usize,
     pub max_dialogue_chars: usize,
+    pub reasoning_effort: Option<ReasoningEffort>,
+    pub structured_output: bool,
 }
 impl Default for ConversationConfig {
     fn default() -> Self {
@@ -41,10 +55,35 @@ impl Default for ConversationConfig {
             initiative_frequency: 1.0,
             history_limit: 16,
             max_dialogue_chars: 180,
+            reasoning_effort: None,
+            structured_output: false,
         }
     }
 }
 impl ConversationConfig {
+    /// Normal desktop launches prefer local inference; tests explicitly retain
+    /// the deterministic `Default` mock and never contact a model by accident.
+    pub fn local_development() -> Self {
+        Self {
+            provider: ProviderKind::Local,
+            model: "auto".into(),
+            timeout_seconds: 60,
+            max_output_tokens: 512,
+            max_dialogue_chars: 240,
+            reasoning_effort: Some(ReasoningEffort::Off),
+            structured_output: true,
+            ..Self::default()
+        }
+    }
+    pub fn for_application(explicit: Option<&Path>, local: &Path) -> Result<Self, String> {
+        if let Some(path) = explicit {
+            Self::load(Some(path))
+        } else if local.exists() {
+            Self::load(Some(local))
+        } else {
+            Ok(Self::local_development())
+        }
+    }
     pub fn load(path: Option<&Path>) -> Result<Self, String> {
         let mut config = if let Some(path) = path {
             serde_json::from_str::<Self>(&fs::read_to_string(path).map_err(|e| e.to_string())?)
@@ -70,6 +109,9 @@ impl ConversationConfig {
             && !self.base_url.starts_with("https://")
         {
             return Err("remote provider requires HTTPS".into());
+        }
+        if self.provider == ProviderKind::Remote && self.model == "auto" {
+            return Err("remote provider requires an explicit model".into());
         }
         if !(1..=120).contains(&self.timeout_seconds)
             || !(16..=1024).contains(&self.max_output_tokens)

@@ -103,7 +103,24 @@ pub enum PresentationEvent {
     },
 }
 
-/// A future dialogue producer supplies this same value. Epochs reject late replies.
+/// Host-assigned provenance, not model-supplied metadata.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DialogueSource {
+    Model,
+    Scripted,
+    Fallback,
+}
+impl DialogueSource {
+    pub fn badge(self) -> &'static str {
+        match self {
+            Self::Model => "",
+            Self::Scripted => " [scripted]",
+            Self::Fallback => " [scripted fallback]",
+        }
+    }
+}
+
+/// Dialogue producers supply this value. Epochs reject late replies.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DialogueLine {
     pub session: u64,
@@ -112,6 +129,7 @@ pub struct DialogueLine {
     pub text: String,
     pub expression: Option<CharacterExpression>,
     pub duration: f32,
+    pub source: DialogueSource,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -213,6 +231,7 @@ impl PresentationState {
             text: text.into(),
             expression: None,
             duration: 3.4,
+            source: DialogueSource::Scripted,
         });
     }
     pub fn apply(&mut self, event: &PresentationEvent) {

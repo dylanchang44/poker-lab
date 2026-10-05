@@ -26,7 +26,21 @@ struct Progress {
 }
 
 fn main() {
+    let mut config = if std::env::args().any(|a| a == "--local") {
+        poker_lab::conversation::ConversationConfig::for_application(
+            std::env::var_os("POKER_LAB_CONFIG")
+                .map(std::path::PathBuf::from)
+                .as_deref(),
+            std::path::Path::new("config/conversation.json"),
+        )
+        .expect("valid local conversation configuration")
+    } else {
+        poker_lab::conversation::ConversationConfig::default()
+    };
+    // Isolate the submitted human turn from unsolicited speech during the check.
+    config.initiative_frequency = 0.0;
     App::new()
+        .insert_resource(ui::conversation::ConversationSettings(config))
         // Explicit opt-in: ordinary smoke checks never touch the user's database.
         .insert_resource(ui::memory::MemorySettings(
             std::env::var_os("POKER_LAB_SMOKE_DB").map(std::path::PathBuf::from),
@@ -206,6 +220,25 @@ fn drive(world: &mut World) {
                 .any(|m| m.speaker == poker_lab::conversation::Speaker::Ananya)
             {
                 return; // A current bubble gets its full reading time before the reply.
+            }
+            if std::env::args().any(|a| a == "--local") {
+                assert!(
+                    chat.manager
+                        .history()
+                        .iter()
+                        .any(|m| m.speaker == poker_lab::conversation::Speaker::Ananya
+                            && m.source == Some(poker_lab::characters::DialogueSource::Model)),
+                    "local GUI check received a scripted fallback, not a model reply"
+                );
+                println!("Verified local model reply through Bevy chat input/presentation.");
+            } else {
+                assert!(
+                    chat.manager
+                        .history()
+                        .iter()
+                        .any(|m| m.speaker == poker_lab::conversation::Speaker::Ananya
+                            && m.source == Some(poker_lab::characters::DialogueSource::Scripted))
+                );
             }
             capture(world, "chat");
         }

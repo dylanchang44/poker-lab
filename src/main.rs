@@ -7,16 +7,15 @@ fn main() {
     let memory_path = poker_lab::memory::database_path()
         .map_err(|error| eprintln!("Memory configuration: {error}; using temporary storage."))
         .ok();
-    let conversation_config = match std::env::var("POKER_LAB_CONFIG") {
-        Ok(path) => {
-            poker_lab::conversation::ConversationConfig::load(Some(std::path::Path::new(&path)))
-                .unwrap_or_else(|_| {
-                    eprintln!("Conversation configuration invalid; using mock dialogue.");
-                    poker_lab::conversation::ConversationConfig::default()
-                })
-        }
-        Err(_) => poker_lab::conversation::ConversationConfig::default(),
-    };
+    let explicit_config = std::env::var_os("POKER_LAB_CONFIG").map(std::path::PathBuf::from);
+    let conversation_config = poker_lab::conversation::ConversationConfig::for_application(
+        explicit_config.as_deref(),
+        std::path::Path::new("config/conversation.json"),
+    )
+    .unwrap_or_else(|_| {
+        eprintln!("Conversation configuration invalid; using visibly labelled scripted mock dialogue. Check POKER_LAB_CONFIG or config/conversation.json.");
+        poker_lab::conversation::ConversationConfig::default()
+    });
     let mut args: Vec<_> = std::env::args().skip(1).collect();
     let mode = if let Some(index) = args.iter().position(|arg| arg == "--heads-up") {
         args.remove(index);

@@ -94,7 +94,7 @@ pub fn spawn(parent: &mut ChildSpawnerCommands) {
             label(panel, "TABLE TALK", 15.0, GOLD);
             panel.spawn((
                 ChatStatus,
-                Text::new("Mock dialogue"),
+                Text::new("Checking dialogue mode…"),
                 TextFont {
                     font_size: 11.0,
                     ..default()
@@ -335,8 +335,9 @@ pub fn render(
                 .map(|m| {
                     let short: String = m.text.chars().take(64).collect();
                     format!(
-                        "{}{}: {}{}",
+                        "{}{}{}: {}{}",
                         m.speaker.label(),
+                        m.source.map_or("", |source| source.badge()),
                         if m.audience == poker_lab::memory::Audience::Public {
                             ""
                         } else {

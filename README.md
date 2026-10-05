@@ -6,7 +6,7 @@ A native Linux Texas Hold'em game built with Rust and Bevy. Stage 6 adds stable 
 
 Developed on CachyOS/Arch Linux with Rust/Cargo 1.94.1 stable, Bevy **0.18.1**, and Zed. Any editor works. Dependencies are explicitly pinned; keep Cargo.lock.
 
-You need Rust/Cargo, a C compiler/linker, pkg-config, a working desktop, and a Vulkan-capable GPU/driver. On Arch, inspect availability of base-devel, pkgconf, wayland, libxkbcommon, libx11, libxcb, vulkan-icd-loader, and your GPU driver; only install missing packages. `vulkaninfo --summary` can check graphics support. Original generated portrait PNGs are in assets/characters. No LLM installation or API key is needed for the default mock mode or to play poker.
+You need Rust/Cargo, a C compiler/linker, pkg-config, a working desktop, and a Vulkan-capable GPU/driver. On Arch, inspect availability of base-devel, pkgconf, wayland, libxkbcommon, libx11, libxcb, vulkan-icd-loader, and your GPU driver; only install missing packages. `vulkaninfo --summary` can check graphics support. Original generated portrait PNGs are in assets/characters. A local model is needed for natural dialogue, but no API key or model is required to play poker with scripted fallback.
 
 Stage 5 also requires SQLite development headers/libraries (`sqlite` on Arch). The pinned `rusqlite = 0.38.0` uses system SQLite, without an ORM or bundled database server. The first Bevy build may take several minutes and several GB. Subsequent builds are incremental.
 
@@ -16,7 +16,7 @@ Stage 5 also requires SQLite development headers/libraries (`sqlite` on Arch). T
 cargo run
 cargo run -- --seed 42
 cargo run -- --heads-up --seed 42  # original two-seat/basic-opponent practice
-POKER_LAB_CONFIG=config/conversation.example.json cargo run  # local model (edit model first)
+POKER_LAB_CONFIG=config/conversation.example.json cargo run  # explicit local settings
 
 cargo check
 cargo build
@@ -34,6 +34,7 @@ cargo run --example ui_smoke
 cargo run --example ui_smoke -- --small
 cargo run --example ui_smoke -- --hd
 cargo run --example ui_smoke -- --qhd
+cargo run --example ui_smoke -- --local  # opt-in live-model GUI check
 ```
 
 The batch runner opens no window and waits for no thinking timers. Release mode is optional for larger batches (`cargo run --release --example batch -- ...`), but its first compilation is separate. Seeded runs repeat when configuration, inputs, strategy parameters, sample count and pinned RNG versions are identical.
@@ -53,23 +54,37 @@ The batch runner opens no window and waits for no thinking timers. Release mode 
 
 LM Studio is the preferred real inference provider for development. It requires no remote credentials. Without a configured local model, mock mode and provider-failure fallback keep the game playable. The remote adapter remains available for later configuration. No OpenAI key is needed for Stage 6.
 
-Without `POKER_LAB_CONFIG`, a deterministic mock provider gives short test dialogue. Poker remains fully playable if a configured provider is down: a short preset line replaces a failed response, while the small status label says **Dialogue fallback**. Set `"enabled": false` to disable generated conversation and retain Stage 3's preset public-event lines.
+Normal desktop launches now prefer LM Studio. Configuration precedence is `POKER_LAB_CONFIG` → ignored local `config/conversation.json` → built-in local defaults. An explicit `{"provider":"mock"}` config retains deterministic offline dialogue; automated tests and ordinary smoke/probe examples still default to mock. An invalid config prints a safe diagnostic and uses clearly labelled mock mode, never a remote service.
 
-For a local model, use [the example config](config/conversation.example.json): load a chat-tuned model in LM Studio, enable its local server in the Developer tab, and replace `YOUR_LOADED_MODEL_ID` with the identifier shown by LM Studio. Its OpenAI-compatible base URL is normally `http://127.0.0.1:1234/v1`; the app posts to `/chat/completions`. LM Studio documents [server startup](https://lmstudio.ai/docs/developer/openai-compat/tools), [chat completions](https://lmstudio.ai/docs/developer/openai-compat/chat-completions), and [model listing](https://lmstudio.ai/docs/developer/openai-compat/models). Copy the example to a local file if you want to preserve it while editing.
+The status starts at **Model not yet verified** and changes to **Local model connected** only after a valid model reply. Mock bubbles/history show **[scripted]**; failures show **[scripted fallback]**, with a safe reason such as server offline, load a model, token limit or invalid reply. These preset lines are not evidence of working AI. They are excluded from model context and new NPC social memories; human messages can still be remembered offline. Set `"enabled": false` to retain only Stage 3's labelled preset public-event lines.
+
+For local inference, load one chat model in LM Studio and enable its local server in the Developer tab, bound to `127.0.0.1:1234`. Then run `cargo run`. The [example config](config/conversation.example.json) uses `"model":"auto"`: it queries LM Studio's native `/api/v1/models` endpoint and selects the single **loaded** chat model. It will not randomly load one of your downloaded models. If several models are loaded, set an explicit model identifier in `config/conversation.json`. Older LM Studio or other compatible local servers without that discovery endpoint also need an explicit identifier.
+
+With the LM Studio CLI installed, an example using an **already downloaded** model is:
+
+```sh
+# Use ~/.lmstudio/bin/lms if lms is not on PATH. Substitute your installed model key.
+lms load google/gemma-4-12b-qat --context-length 8192 --parallel 1 --identifier poker-lab-local
+lms server start --port 1234 --bind 127.0.0.1
+cargo run
+```
+
+There is no automatic download, daemon installation or remote credential setup. Reload the model after quitting LM Studio or an idle unload. Local defaults use a 60-second worker deadline, 512 output tokens, 240 dialogue characters, `"reasoning_effort":"none"` and `"structured_output":true`. Disabling reasoning prevents supported thinking models from spending the entire short reply budget without producing dialogue. [LM Studio's JSON-schema output](https://lmstudio.ai/docs/developer/openai-compat/structured-output) constrains speaker, expression and social metadata; the application still validates the result. For a model/API that rejects these optional fields, set `reasoning_effort` to `null` and/or `structured_output` to `false`, and tune the token budget as needed. Generation and discovery share one deadline on the background worker.
 
 For a remote OpenAI-compatible service, set `"provider": "remote"`, an **HTTPS** `"base_url"` ending at the API version (for example `https://api.openai.com/v1`), and a supported `"model"`. Set `"api_key_env": "POKER_LAB_API_KEY"`, then export that variable in your shell without writing the key into the config or repository. The adapter uses the [Chat Completions API](https://developers.openai.com/api/reference/resources/chat), not poker-action tools. A remote provider with no key falls back safely. The endpoint must support compatible `messages`, `model`, `temperature`, `max_tokens`, and non-streaming responses. Models vary in JSON reliability; all responses are locally validated.
 
-Other settings: `timeout_seconds` (1–120), `max_output_tokens` (16–1024), `temperature` (0–2), `initiative_frequency` (0–3, with 0 disabling unsolicited speech), and `history_limit` (4–32 messages). Recent history is bounded in memory. Stage 5 saves selected meaningful quotes, not an unlimited transcript; API keys are never saved. A turn sends bounded permitted dialogue, a concise public table snapshot, up to three relevant memories, and relationship context. A slow call runs in a worker and never pauses betting/rendering.
+Other settings: `timeout_seconds` (1–120), `max_output_tokens` (16–1024), `temperature` (0–2), `initiative_frequency` (0–3, with 0 disabling unsolicited speech), and `history_limit` (4–32 messages). `reasoning_effort` accepts null/none/low/medium/high; it and `structured_output` are opt-in for custom/remote configs, so existing compatible providers need not implement them. Recent history is bounded in memory. Stage 5 saves selected meaningful quotes, not an unlimited transcript; API keys are never saved. A turn sends bounded permitted dialogue, a concise public table snapshot, up to three relevant memories, and relationship context. A slow call runs in a worker and never pauses betting/rendering.
 
-Stage 6 adds `max_dialogue_chars` (80–360, default 180). The default output token budget is now 256 to accommodate the richer JSON response. Character prompts include stable preferences/boundaries, current mood, relationship context, relevant memories and recent conversation. Ordinary conversation is interpreted by the local model; no phrase-to-reply table drives real inference. Characters may disagree, decline, ask questions, end an exchange or choose silence. They are fictional characters and do not have a real off-screen life or make real appointments.
+Stage 6 adds `max_dialogue_chars` (80–360; local preset 240, legacy/mock default 180). Character prompts include stable preferences/boundaries, current mood, relationship context, relevant memories and recent conversation as background. The latest player message is a separate user message, not buried inside the poker snapshot. Ordinary conversation is interpreted by the local model; no phrase-to-reply table drives real inference. Characters may disagree, decline, ask questions, end an exchange or choose silence. They are fictional characters and do not have a real off-screen life or make real appointments.
 
 Mood changes gradually from public net poker results and conservatively recognized social cues. It persists across hands, recovers toward the character's baseline during play, and resets for a new match. Persistent relationships and memories survive that reset. A mood word appears beneath idle portraits; thinking and temporary expression reactions take precedence. The optional Memories inspector is a debug view with numeric state, separate from ordinary table feedback.
 
 ```sh
 # Deterministic, window-free conversation plumbing check; uses isolated temporary memory:
 cargo run --example social_probe
-# Audition the same seven acceptance scenarios against a loaded LM Studio model:
-POKER_LAB_CONFIG=config/conversation.example.json cargo run --example social_probe
+# Eleven messages per NPC: original scenarios plus music, short-term recall and fatigue.
+# Fails on mock/fallback/missing replies; human review is still needed for quality:
+cargo run --example social_probe -- --require-model
 ```
 
 The mock is deliberately a test fixture, not a substitute language model. It cannot demonstrate nuanced acceptance/decline behavior or natural ordinary conversation. See [Stage 6 design, schema and verification](docs/stage6-verification.md) for what was tested and the remaining live-model checklist.

@@ -130,6 +130,7 @@ fn dialogue_speaker_and_epoch_guard_survive_restart_and_next_hand() {
         text: "Well played.".into(),
         expression: Some(CharacterExpression::Happy),
         duration: 2.0,
+        source: DialogueSource::Scripted,
     };
     assert!(s.say(line.clone()));
     assert_eq!(profile(s.dialogue.as_ref().unwrap().speaker).name, "Yuna");

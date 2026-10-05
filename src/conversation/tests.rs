@@ -66,6 +66,136 @@ fn configuration_defaults_and_validation() {
 }
 
 #[test]
+fn desktop_defaults_to_local_but_explicit_mock_still_wins() {
+    let dir = std::env::temp_dir().join(format!("poker-config-{:016x}", rand::random::<u64>()));
+    std::fs::create_dir(&dir).unwrap();
+    let local = dir.join("conversation.json");
+    let config = ConversationConfig::for_application(None, &local).unwrap();
+    assert_eq!(config.provider, ProviderKind::Local);
+    assert_eq!(config.model, "auto");
+    assert_eq!(config.reasoning_effort, Some(ReasoningEffort::Off));
+    assert!(config.structured_output);
+    config.validate().unwrap();
+    std::fs::write(&local, r#"{"provider":"local","model":"chosen"}"#).unwrap();
+    assert_eq!(
+        ConversationConfig::for_application(None, &local)
+            .unwrap()
+            .model,
+        "chosen"
+    );
+    let explicit = dir.join("mock.json");
+    std::fs::write(&explicit, r#"{"provider":"mock"}"#).unwrap();
+    assert_eq!(
+        ConversationConfig::for_application(Some(&explicit), &local)
+            .unwrap()
+            .provider,
+        ProviderKind::Mock
+    );
+    std::fs::write(&explicit, "invalid").unwrap();
+    assert!(ConversationConfig::for_application(Some(&explicit), &local).is_err());
+    std::fs::remove_file(explicit).unwrap();
+    std::fs::remove_file(local).unwrap();
+    std::fs::remove_dir(dir).unwrap();
+    let config: ConversationConfig = serde_json::from_str(
+        r#"{"provider":"remote","base_url":"https://example.invalid/v1","model":"chosen"}"#,
+    )
+    .unwrap();
+    config.validate().unwrap();
+    assert_eq!(config.reasoning_effort, None);
+    assert!(!config.structured_output);
+    assert!(
+        serde_json::from_str::<ConversationConfig>(r#"{"reasoning_effort":"invented"}"#).is_err()
+    );
+}
+
+#[test]
+fn discovery_selects_only_one_loaded_chat_model() {
+    use serde_json::json;
+    let llm = json!({"type":"llm","key":"disk-name","loaded_instances":[{"id":"loaded-name"}]});
+    let embedding = json!({"type":"embedding","loaded_instances":[{"id":"not-a-chat-model"}]});
+    let unloaded = json!({"type":"llm","key":"huge-model","loaded_instances":[]});
+    assert_eq!(
+        provider::loaded_model(&json!({"models":[llm,embedding,unloaded]})).unwrap(),
+        "loaded-name"
+    );
+    assert!(
+        provider::loaded_model(&json!({"models":[unloaded,embedding]}))
+            .unwrap_err()
+            .contains("no loaded")
+    );
+    assert!(
+        provider::loaded_model(&json!({"models":[llm,llm]}))
+            .unwrap_err()
+            .contains("multiple loaded")
+    );
+    assert!(provider::loaded_model(&json!({"data":[]})).is_err());
+}
+
+#[test]
+fn reasoning_only_and_truncated_outputs_are_not_dialogue() {
+    use serde_json::json;
+    let limited = json!({"choices":[{"finish_reason":"length","message":{"content":"", "reasoning_content":"PRIVATE_REASONING"}}]});
+    let error = provider::dialogue_content(limited).unwrap_err();
+    assert!(error.contains("token limit"));
+    assert!(!error.contains("PRIVATE_REASONING"));
+    assert!(provider::dialogue_content(json!({"choices":[{"message":{"content":"  "}}]})).is_err());
+    assert_eq!(
+        provider::dialogue_content(
+            json!({"choices":[{"finish_reason":"stop","message":{"content":"a reply"}}]})
+        )
+        .unwrap(),
+        "a reply"
+    );
+}
+
+#[test]
+fn provenance_and_connection_status_are_host_owned_and_reset() {
+    let config = ConversationConfig::local_development();
+    let mut manager = ConversationManager::new(config, Arc::new(MockProvider));
+    assert_eq!(manager.status, ProviderStatus::Unverified);
+    let request = manager.request(
+        Speaker::Yuna,
+        InteractionType::Reply,
+        context(1),
+        Some("Hello".into()),
+    );
+    let reply = r#"{"speaker":"yuna","dialogue":"Hello there."}"#.to_string();
+    let line = manager.deliver(request.clone(), Ok(reply)).unwrap();
+    assert_eq!(line.source, DialogueSource::Model);
+    assert_eq!(manager.status, ProviderStatus::Ready);
+    let line = manager
+        .deliver(
+            request.clone(),
+            Err("network or protocol error SECRET".into()),
+        )
+        .unwrap();
+    assert_eq!(line.source, DialogueSource::Fallback);
+    assert_eq!(
+        manager.history().back().unwrap().source,
+        Some(DialogueSource::Fallback)
+    );
+    assert_eq!(manager.label(), "Scripted fallback: server offline");
+    assert!(line.source.badge().contains("scripted fallback"));
+    assert_eq!(
+        parse_social_response(
+            r#"{"speaker":"yuna","dialogue":"Hello","source":"model"}"#,
+            Speaker::Yuna,
+            240
+        ),
+        Err(ResponseError::InvalidMetadata)
+    );
+    manager.reset(2);
+    assert_eq!(manager.status, ProviderStatus::Unverified);
+    assert!(!manager.verified);
+    let mut mock = ConversationManager::new(ConversationConfig::default(), Arc::new(MockProvider));
+    let line = mock
+        .deliver(request.clone(), MockProvider.respond(&request))
+        .unwrap();
+    assert_eq!(line.source, DialogueSource::Scripted);
+    assert_eq!(mock.label(), "Scripted mock (no model)");
+}
+
+#[test]
 fn response_schema_rejects_wrong_identity_expression_and_length() {
     let valid = r#"{"speaker":"freya","dialogue":"A neat move.","expression":"happy","interaction_type":"reply"}"#;
     assert_eq!(
@@ -374,6 +504,19 @@ fn openai_compatible_adapter_posts_bounded_public_context() {
         assert!(request.contains("Temporary character state"));
         assert!(request.contains("Stable personality"));
         assert!(request.contains("Familiarity and trust influence comfort"));
+        let (_, body) = request.split_once("\r\n\r\n").unwrap();
+        let body: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(body["messages"][1]["content"], "Hello");
+        assert_eq!(body["reasoning_effort"], "none");
+        assert_eq!(body["response_format"]["type"], "json_schema");
+        let schema = &body["response_format"]["json_schema"]["schema"];
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(
+            schema["properties"]["speaker"]["enum"],
+            serde_json::json!(["freya"])
+        );
+        assert_eq!(schema["properties"]["dialogue"]["maxLength"], 240);
+        assert!(!request.contains("SCRIPTED_FIXTURE_DO_NOT_SEND"));
         assert!(!request.to_lowercase().contains("authorization: bearer"));
         assert!(!request.contains("hole_cards") && !request.contains("CardBurned"));
         let result = serde_json::json!({"choices":[{"message":{"content":"{\"speaker\":\"freya\",\"dialogue\":\"A fine hand.\",\"expression\":\"happy\"}"}}]}).to_string();
@@ -382,7 +525,8 @@ fn openai_compatible_adapter_posts_bounded_public_context() {
     let config = ConversationConfig {
         provider: ProviderKind::Local,
         base_url: format!("http://{address}/v1"),
-        ..Default::default()
+        model: "fixture-model".into(),
+        ..ConversationConfig::local_development()
     };
     let request = TurnRequest {
         session: 1,
@@ -390,7 +534,12 @@ fn openai_compatible_adapter_posts_bounded_public_context() {
         speaker: Speaker::Freya,
         kind: InteractionType::Reply,
         context: context(8),
-        history: vec![],
+        history: vec![ChatMessage {
+            speaker: Speaker::Freya,
+            text: "SCRIPTED_FIXTURE_DO_NOT_SEND".into(),
+            audience: Audience::Public,
+            source: Some(DialogueSource::Fallback),
+        }],
         player_text: Some("Hello".into()),
         may_interject: false,
         audience: Audience::Public,
