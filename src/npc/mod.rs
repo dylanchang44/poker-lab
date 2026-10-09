@@ -6,6 +6,10 @@ pub mod equity;
 mod personality;
 pub mod profiles;
 pub use personality::PersonalityStrategy;
+pub mod adaptation;
+pub mod opponent;
+#[cfg(test)]
+mod opponent_tests;
 pub mod simulation;
 #[cfg(test)]
 mod tests;

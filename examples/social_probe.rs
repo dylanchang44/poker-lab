@@ -52,6 +52,8 @@ fn main() -> Result<(), String> {
         "What kind of music did I just mention?",
         "I'm exhausted from work; can we talk about something other than poker?",
         "Remember what happened yesterday?",
+        "I'm feeling tired today.",
+        "Remember what we talked about yesterday?",
     ];
     let mut generated = 0;
     let mut failures = 0;
@@ -88,11 +90,17 @@ fn main() -> Result<(), String> {
                     .unwrap_or_else(|| "(silence)".into()),
                 manager.label()
             );
+            println!(
+                "  {:.2}s; diagnostic: {:?}",
+                start.elapsed().as_secs_f64(),
+                manager.diagnostics().last_issue
+            );
         }
     }
     println!(
         "\nModel-generated replies: {generated}; scripted, silent or missing replies: {failures}."
     );
+    println!("Host provenance totals: {:?}", manager.diagnostics());
     if require_model && failures > 0 {
         return Err("Local conversation acceptance probe had non-model or missing replies. Review output; do not count fallbacks as successful inference.".into());
     }

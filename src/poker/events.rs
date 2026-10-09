@@ -19,6 +19,15 @@ pub enum GameEvent {
         seat: Seat,
         cards: [Card; 2],
     },
+    /// Public opportunity immediately before a validated action. No cards/equity.
+    DecisionOffered {
+        seat: Seat,
+        phase: Phase,
+        pot: Chips,
+        to_call: Chips,
+        street_bet: Chips,
+        can_raise: bool,
+    },
     PlayerActed {
         seat: Seat,
         phase: Phase,

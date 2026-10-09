@@ -253,10 +253,9 @@ pub fn spawn_dialogue(parent: &mut ChildSpawnerCommands) {
             DialoguePanel,
             Node {
                 position_type: PositionType::Absolute,
-                left: Val::Percent(50.0),
-                margin: UiRect::left(Val::Px(-285.0)),
-                bottom: Val::Px(246.0),
-                width: Val::Px(570.0),
+                left: Val::Percent(7.0),
+                right: Val::Percent(7.0),
+                top: Val::Px(660.0),
                 min_height: Val::Px(64.0),
                 padding: UiRect::axes(Val::Px(12.0), Val::Px(4.0)),
                 border: UiRect::left(Val::Px(2.0)),
@@ -281,6 +280,7 @@ pub fn spawn_dialogue(parent: &mut ChildSpawnerCommands) {
             ));
             panel.spawn((
                 DialogueText,
+                TextLayout::new_with_linebreak(bevy::text::LineBreak::WordOrCharacter),
                 Node {
                     min_width: Val::Px(0.0),
                     flex_shrink: 1.0,

@@ -6,6 +6,7 @@ use bevy::{
     input::{
         ButtonState,
         keyboard::{Key, KeyboardInput},
+        mouse::{MouseScrollUnit, MouseWheel},
     },
     prelude::*,
 };
@@ -28,6 +29,7 @@ pub struct ConversationUi {
     clock: f32,
     event_cursor: usize,
     social_cursor: usize,
+    pub follow_latest: bool,
 }
 impl FromWorld for ConversationUi {
     fn from_world(world: &mut World) -> Self {
@@ -51,6 +53,7 @@ impl FromWorld for ConversationUi {
             clock: 0.0,
             event_cursor: 0,
             social_cursor: 0,
+            follow_latest: true,
         }
     }
 }
@@ -63,25 +66,33 @@ pub struct ChatInput;
 pub struct ChatTarget;
 #[derive(Component)]
 pub struct ChatStatus;
+#[derive(Component)]
+pub struct ChatViewport;
+#[derive(Component)]
+pub struct ChatPanel;
 #[derive(Component, Clone, Copy)]
 pub enum ChatControl {
     Target,
     Input,
     Send,
+    Older,
+    Newer,
+    Latest,
 }
 
 pub fn spawn(parent: &mut ChildSpawnerCommands) {
     parent
         .spawn((
+            ChatPanel,
             Node {
                 position_type: PositionType::Absolute,
                 left: Val::Px(12.0),
-                top: Val::Px(670.0),
-                width: Val::Px(250.0),
-                height: Val::Px(266.0),
+                top: Val::Px(840.0),
+                width: Val::Percent(60.0),
+                height: Val::Px(308.0),
                 padding: UiRect::all(Val::Px(9.0)),
                 flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(6.0),
+                row_gap: Val::Px(4.0),
                 border: UiRect::all(Val::Px(1.0)),
                 border_radius: BorderRadius::all(Val::Px(9.0)),
                 ..default()
@@ -100,22 +111,48 @@ pub fn spawn(parent: &mut ChildSpawnerCommands) {
                     ..default()
                 },
                 TextColor(MUTED),
-            ));
-            panel.spawn((
-                ChatHistory,
-                Text::new("Say something to the table."),
-                TextFont {
-                    font_size: 12.0,
-                    ..default()
-                },
-                TextColor(TEXT),
                 Node {
-                    width: Val::Percent(100.0),
-                    height: Val::Px(142.0),
-                    overflow: Overflow::clip(),
+                    height: Val::Px(26.0),
+                    flex_shrink: 0.0,
                     ..default()
                 },
             ));
+            panel
+                .spawn((
+                    ChatViewport,
+                    Interaction::default(),
+                    ScrollPosition::default(),
+                    Node {
+                        width: Val::Percent(100.0),
+                        // Vertical layout preserves the transcript's measured height.
+                        // A default row stretches its child to the viewport height,
+                        // hiding overflow from the scroll-range calculation.
+                        flex_direction: FlexDirection::Column,
+                        flex_grow: 1.0,
+                        flex_basis: Val::Px(0.0),
+                        min_height: Val::Px(0.0),
+                        overflow: Overflow::scroll_y(),
+                        ..default()
+                    },
+                ))
+                .with_children(|p| {
+                    p.spawn((
+                        ChatHistory,
+                        Text::new("Say something to the table."),
+                        TextFont {
+                            font_size: 15.0,
+                            ..default()
+                        },
+                        TextColor(TEXT),
+                        TextLayout::new_with_linebreak(bevy::text::LineBreak::WordOrCharacter),
+                        Node {
+                            width: Val::Percent(100.0),
+                            flex_shrink: 0.0,
+                            ..default()
+                        },
+                    ));
+                });
+            chat_button(panel, ChatControl::Input, 360.0, ChatInput, "Click to chat");
             panel
                 .spawn(Node {
                     width: Val::Percent(100.0),
@@ -124,9 +161,11 @@ pub fn spawn(parent: &mut ChildSpawnerCommands) {
                 })
                 .with_children(|row| {
                     chat_button(row, ChatControl::Target, 95.0, ChatTarget, "Everyone");
-                    chat_button(row, ChatControl::Input, 133.0, ChatInput, "Click to chat");
+                    chat_button(row, ChatControl::Older, 50.0, (), "Older");
+                    chat_button(row, ChatControl::Newer, 55.0, (), "Newer");
+                    chat_button(row, ChatControl::Latest, 60.0, (), "Latest");
+                    chat_button(row, ChatControl::Send, 137.0, (), "Send / Enter");
                 });
-            chat_button(panel, ChatControl::Send, 228.0, (), "Send / Enter");
         });
 }
 fn chat_button<B: Bundle>(
@@ -141,12 +180,22 @@ fn chat_button<B: Bundle>(
             Button,
             kind,
             Node {
-                width: Val::Px(width),
-                height: Val::Px(28.0),
+                width: if matches!(kind, ChatControl::Input) {
+                    Val::Percent(100.0)
+                } else {
+                    Val::Px(width)
+                },
+                height: Val::Px(if matches!(kind, ChatControl::Input) {
+                    64.0
+                } else {
+                    28.0
+                }),
+                flex_shrink: 0.0,
+                padding: UiRect::all(Val::Px(4.0)),
                 justify_content: JustifyContent::Center,
                 align_items: AlignItems::Center,
                 border_radius: BorderRadius::all(Val::Px(5.0)),
-                overflow: Overflow::clip(),
+                overflow: Overflow::scroll_y(),
                 ..default()
             },
             BackgroundColor(BUTTON),
@@ -156,10 +205,21 @@ fn chat_button<B: Bundle>(
                 marker,
                 Text::new(caption),
                 TextFont {
-                    font_size: 12.0,
+                    font_size: if matches!(kind, ChatControl::Input) {
+                        15.0
+                    } else {
+                        13.0
+                    },
                     ..default()
                 },
                 TextColor(TEXT),
+                Node {
+                    min_width: Val::Px(0.0),
+                    max_width: Val::Percent(100.0),
+                    flex_shrink: 0.0,
+                    ..default()
+                },
+                TextLayout::new_with_linebreak(bevy::text::LineBreak::WordOrCharacter),
             ));
         });
 }
@@ -178,7 +238,26 @@ pub fn buttons(
     mut buttons: ChatButtons,
     mut chat: ResMut<ConversationUi>,
     mut session: ResMut<GameSession>,
+    mut viewport: Query<(&Interaction, &ComputedNode, &mut ScrollPosition), With<ChatViewport>>,
+    mut wheel: MessageReader<MouseWheel>,
 ) {
+    for event in wheel.read() {
+        for (hover, node, mut scroll) in &mut viewport {
+            if *hover != Interaction::None {
+                let delta = event.y
+                    * if event.unit == MouseScrollUnit::Line {
+                        28.0
+                    } else {
+                        1.0
+                    };
+                let bottom = ((node.content_size().y - node.size().y)
+                    * node.inverse_scale_factor())
+                .max(0.0);
+                scroll.y = (scroll.y - delta).clamp(0.0, bottom);
+                chat.follow_latest = scroll.y >= bottom - 1.0;
+            }
+        }
+    }
     for (interaction, control, mut color) in &mut buttons {
         *color = match interaction {
             Interaction::None => BUTTON.into(),
@@ -206,6 +285,22 @@ pub fn buttons(
                 session.editing = false;
             }
             ChatControl::Send => send(&mut chat, &session),
+            ChatControl::Older => {
+                chat.follow_latest = false;
+                for (_, _, mut scroll) in &mut viewport {
+                    scroll.y = (scroll.y - 140.0).max(0.0);
+                }
+            }
+            ChatControl::Newer => {
+                for (_, node, mut scroll) in &mut viewport {
+                    let bottom = ((node.content_size().y - node.size().y)
+                        * node.inverse_scale_factor())
+                    .max(0.0);
+                    scroll.y = (scroll.y + 140.0).min(bottom);
+                    chat.follow_latest = scroll.y >= bottom - 1.0;
+                }
+            }
+            ChatControl::Latest => chat.follow_latest = true,
         }
     }
 }
@@ -250,6 +345,7 @@ fn send(chat: &mut ConversationUi, session: &GameSession) {
     {
         chat.input.clear();
         chat.editing = false;
+        chat.follow_latest = true;
     }
 }
 pub fn update(
@@ -257,6 +353,7 @@ pub fn update(
     mut chat: ResMut<ConversationUi>,
     mut session: ResMut<GameSession>,
     mut output: MessageWriter<DialogueRequest>,
+    learning: Res<super::learning::LearningUi>,
 ) {
     chat.clock += time.delta_secs();
     if chat.manager.session() != session.presentation.session {
@@ -277,7 +374,8 @@ pub fn update(
     }
     let view = session.engine.observe(Seat::Human);
     let winners: Vec<_> = session.public_winners.iter().cloned().collect();
-    let context = public_context(&view, &winners);
+    let mut context = public_context(&view, &winners);
+    context.strategic_reads = learning.hints.clone();
     for cue in session.conversation_cues.iter() {
         if cue.event_id <= chat.event_cursor {
             continue;
@@ -324,7 +422,7 @@ pub fn render(
             .history()
             .iter()
             .rev()
-            .take(4)
+            .take(32)
             .collect::<Vec<_>>();
         value.0 = if lines.is_empty() {
             "Say something to the table.".into()
@@ -333,9 +431,8 @@ pub fn render(
                 .into_iter()
                 .rev()
                 .map(|m| {
-                    let short: String = m.text.chars().take(64).collect();
                     format!(
-                        "{}{}{}: {}{}",
+                        "{}{}{}:\n{}",
                         m.speaker.label(),
                         m.source.map_or("", |source| source.badge()),
                         if m.audience == poker_lab::memory::Audience::Public {
@@ -343,16 +440,11 @@ pub fn render(
                         } else {
                             " [private]"
                         },
-                        short,
-                        if m.text.chars().count() > 64 {
-                            "…"
-                        } else {
-                            ""
-                        }
+                        m.text,
                     )
                 })
                 .collect::<Vec<_>>()
-                .join("\n")
+                .join("\n\n")
         };
     }
     if let Ok(mut value) = target.single_mut() {
@@ -367,19 +459,10 @@ pub fn render(
             }
             .into()
         } else {
-            let tail: String = chat
-                .input
-                .chars()
-                .rev()
-                .take(18)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect();
             if chat.editing {
-                format!("{tail}│")
+                format!("{}│", chat.input)
             } else {
-                tail
+                chat.input.clone()
             }
         };
     }
@@ -396,5 +479,17 @@ pub fn render(
                 " / private"
             }
         );
+    }
+}
+
+pub fn scroll_latest(
+    chat: Res<ConversationUi>,
+    mut viewport: Query<(&ComputedNode, &mut ScrollPosition), With<ChatViewport>>,
+) {
+    if chat.follow_latest {
+        for (node, mut scroll) in &mut viewport {
+            scroll.y =
+                ((node.content_size().y - node.size().y) * node.inverse_scale_factor()).max(0.0);
+        }
     }
 }

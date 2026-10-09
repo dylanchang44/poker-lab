@@ -88,6 +88,9 @@ pub struct GameSession {
     pub presentation: PresentationState,
     event_cursor: usize,
     hand_start_stacks: Vec<u32>,
+    opponent_observer: poker_lab::npc::opponent::Observer,
+    pub completed_observations: VecDeque<(u64, poker_lab::npc::opponent::HandSample)>,
+    pub reads: [poker_lab::npc::adaptation::Adaptation; 3],
 }
 
 impl GameSession {
@@ -123,6 +126,9 @@ impl GameSession {
             social_events: VecDeque::new(),
             event_cursor: 0,
             hand_start_stacks: Vec::new(),
+            opponent_observer: Default::default(),
+            completed_observations: VecDeque::new(),
+            reads: std::array::from_fn(|_| Default::default()),
             presentation: PresentationState {
                 session: id,
                 ..Default::default()
@@ -175,6 +181,9 @@ impl GameSession {
             .enumerate()
         {
             let event_id = self.event_cursor + offset + 1;
+            if let Some(sample) = self.opponent_observer.observe(event) {
+                self.completed_observations.push_back(sample);
+            }
             if let GameEvent::HandStarted { stacks, .. } = event {
                 self.hand_start_stacks = stacks.clone();
             }
@@ -394,6 +403,12 @@ pub fn npc_turn(time: Res<Time>, mut session: ResMut<GameSession>) {
 }
 
 impl GameSession {
+    pub fn snapshot_strategy(&mut self, model: &poker_lab::npc::opponent::OpponentModel) {
+        for (i, npc) in poker_lab::npc::profiles::NpcId::ALL.into_iter().enumerate() {
+            self.reads[i] = poker_lab::npc::adaptation::Adaptation::for_player(npc, model);
+            self.strategies[npc.seat().index()].adaptation = self.reads[i].clone();
+        }
+    }
     fn token(&self, seat: Seat) -> TurnToken {
         TurnToken {
             session: self.id,

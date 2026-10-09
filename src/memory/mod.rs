@@ -46,6 +46,11 @@ pub fn database_path() -> Result<PathBuf, String> {
 
 #[derive(Clone)]
 enum Write {
+    Opponent {
+        key: String,
+        sample: Box<crate::npc::opponent::HandSample>,
+        at: i64,
+    },
     Begin {
         key: String,
         participants: Vec<NpcId>,
@@ -74,6 +79,7 @@ enum Command {
 }
 #[derive(Default, Clone)]
 pub struct MemorySnapshot {
+    pub opponent: Option<crate::npc::opponent::OpponentModel>,
     pub characters: Vec<CharacterSnapshot>,
     pub persistent: bool,
     pub error: Option<String>,
@@ -86,6 +92,13 @@ struct ServiceInner {
 #[derive(Clone)]
 pub struct MemoryService(Arc<ServiceInner>);
 impl MemoryService {
+    pub fn record_opponent(&self, key: String, sample: crate::npc::opponent::HandSample) {
+        self.submit(Command::Write(Write::Opponent {
+            key,
+            sample: Box::new(sample),
+            at: now(),
+        }));
+    }
     /// None means an isolated in-memory store, used by all automated Bevy tests.
     pub fn start(path: Option<PathBuf>) -> Self {
         let (sender, receiver) = mpsc::sync_channel(128);
@@ -166,6 +179,7 @@ fn apply(
     write: &Write,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     match write {
+        Write::Opponent { key, sample, at } => repository.record_opponent(key, sample, *at),
         Write::Begin {
             key,
             participants,
@@ -225,6 +239,7 @@ fn worker(
             }
         }
         *snapshot.lock().unwrap() = MemorySnapshot {
+            opponent: repository.opponent_model().ok(),
             characters: repository.snapshots().unwrap_or_default(),
             persistent,
             error: error.clone(),
@@ -282,6 +297,7 @@ fn worker(
             }
             Command::Flush(reply) => {
                 *snapshot.lock().unwrap() = MemorySnapshot {
+                    opponent: repository.opponent_model().ok(),
                     characters: repository.snapshots().unwrap_or_default(),
                     persistent,
                     error: error.clone(),

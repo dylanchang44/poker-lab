@@ -3,7 +3,7 @@ use crate::poker::Seat;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::{path::Path, time::Duration};
 
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 pub const MEMORY_LIMIT: usize = 96;
 pub struct Repository {
     connection: Connection,
@@ -57,6 +57,11 @@ impl Repository {
                 ALTER TABLE sessions ADD COLUMN statistics TEXT NOT NULL DEFAULT '{}';
                 PRAGMA user_version=3;",
             )?;
+        }
+        if version < 4 {
+            tx.execute_batch("CREATE TABLE opponent_model(id INTEGER PRIMARY KEY CHECK(id=1), model TEXT NOT NULL, updated_at INTEGER NOT NULL);
+                CREATE TABLE opponent_commits(id INTEGER PRIMARY KEY, event_key TEXT NOT NULL UNIQUE);
+                PRAGMA user_version=4;")?;
         }
         for npc in NpcId::ALL {
             tx.execute(
@@ -404,6 +409,68 @@ impl Repository {
                 tx.execute("DELETE FROM memories WHERE npc_id=?1", [owner.id()])?;
                 tx.execute("UPDATE npc_profiles SET sessions=0,hands=0,last_interaction=NULL WHERE npc_id=?1", [owner.id()])?;
             }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+    pub fn opponent_model(&self) -> Result<crate::npc::opponent::OpponentModel> {
+        let text: Option<String> = self
+            .connection
+            .query_row("SELECT model FROM opponent_model WHERE id=1", [], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        Ok(match text {
+            Some(text) => serde_json::from_str(&text)?,
+            None => Default::default(),
+        })
+    }
+    pub fn record_opponent(
+        &mut self,
+        key: &str,
+        sample: &crate::npc::opponent::HandSample,
+        at: i64,
+    ) -> Result<()> {
+        let tx = self.connection.transaction()?;
+        if tx.execute(
+            "INSERT OR IGNORE INTO opponent_commits(event_key) VALUES(?1)",
+            [key],
+        )? == 0
+        {
+            return Ok(());
+        }
+        // Read after acquiring the write transaction: two application instances
+        // must not overwrite each other's completed-hand totals.
+        let text: Option<String> = tx
+            .query_row("SELECT model FROM opponent_model WHERE id=1", [], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        let mut model: crate::npc::opponent::OpponentModel = match text {
+            Some(text) => serde_json::from_str(&text)?,
+            None => Default::default(),
+        };
+        model.record(sample.clone());
+        tx.execute("INSERT INTO opponent_model(id,model,updated_at) VALUES(1,?1,?2) ON CONFLICT(id) DO UPDATE SET model=excluded.model,updated_at=excluded.updated_at",params![serde_json::to_string(&model)?,at])?;
+        // More than the bounded 256-write recovery journal; retry replay is idempotent.
+        tx.execute("DELETE FROM opponent_commits WHERE id NOT IN (SELECT id FROM opponent_commits ORDER BY id DESC LIMIT 1024)",[])?;
+        tx.commit()?;
+        Ok(())
+    }
+    pub fn reset_opponent(&mut self) -> Result<()> {
+        let tx = self.connection.transaction()?;
+        tx.execute("DELETE FROM opponent_model", [])?;
+        tx.execute("DELETE FROM opponent_commits", [])?;
+        tx.commit()?;
+        Ok(())
+    }
+    pub fn reset_memories_only(&mut self, npc: Option<NpcId>) -> Result<()> {
+        let tx = self.connection.transaction()?;
+        for owner in NpcId::ALL
+            .into_iter()
+            .filter(|n| npc.is_none_or(|selected| selected == *n))
+        {
+            tx.execute("DELETE FROM memories WHERE npc_id=?1", [owner.id()])?;
         }
         tx.commit()?;
         Ok(())

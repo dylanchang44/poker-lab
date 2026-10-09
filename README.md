@@ -1,6 +1,6 @@
 # Poker Lab
 
-A native Linux Texas Hold'em game built with Rust and Bevy. Stage 6 adds stable conversational personalities, temporary moods, personal boundaries, richer social replies and bounded initiative for **Ananya (The Analyst)**, **Freya (The Gambler)**, and **Yuna (The Observer)**. Stage 5 memories and relationships persist locally. Their poker strategies remain unchanged. Each starts with 1,000 virtual chips; blinds stay at 5/10. Play until one player holds all 4,000 chips.
+A native Linux Texas Hold'em game built with Rust and Bevy. Stage 7 adds persistent, public-action opponent learning for **Ananya (The Analyst)**, **Freya (The Gambler)**, and **Yuna (The Observer)**, plus a wider, scrollable Table Talk panel. Their stable poker personalities now receive bounded, evidence-based adjustments. Social memories, relationships, moods, portraits and local-model conversations remain separate from betting decisions. Each starts with 1,000 virtual chips; blinds stay at 5/10. Play until one player holds all 4,000 chips.
 
 ## Requirements
 
@@ -26,6 +26,8 @@ cargo test
 
 # Headless personality evaluation: matches, seed, equity samples, hand cap/match
 cargo run --example batch -- 100 42 96 10000
+# Adaptive evaluation: hands/profile, seed, equity samples (five batches)
+cargo run --example adaptive -- 2000 42 32
 # Original Stage 1 headless example remains available:
 cargo run --example simulate -- 42
 
@@ -34,6 +36,7 @@ cargo run --example ui_smoke
 cargo run --example ui_smoke -- --small
 cargo run --example ui_smoke -- --hd
 cargo run --example ui_smoke -- --qhd
+cargo run --example ui_smoke -- --small --long-chat
 cargo run --example ui_smoke -- --local  # opt-in live-model GUI check
 ```
 
@@ -48,7 +51,29 @@ The batch runner opens no window and waits for no thinking timers. Release mode 
 5. NPC decisions run in background threads with a default 0.55-second minimum thinking interval. There is no sleeping on the rendering thread.
 6. Review each hand's main/side-pot awards, then choose **Next Hand**. Eliminated seats stay visibly marked OUT and are skipped. If you bust, you can spectate the remaining players and continue dealing.
 7. **New Match** is always available in the header and resets all stacks. **Back to Menu** abandons the current match. At the final result, start another match or return to the menu.
-8. Use **Table Talk** at lower left: click **Everyone** to cycle to Ananya, Freya, or Yuna; click the input, type up to 240 characters, then press Enter or **Send**. Recent shared dialogue remains visible. Escape leaves chat entry. Clicking a poker control leaves chat entry, so typing a wager does not send chat.
+8. Use the wide **Table Talk** panel below the centered table: click **Everyone** to cycle to Ananya, Freya, or Yuna; click the input, type up to 240 characters, then press Enter or **Send**. Full validated replies wrap. Scroll with the mouse wheel over the transcript, or use **Older** / **Newer**; **Latest** resumes following new messages. The full input wraps too. Compact betting controls occupy a separate lower-right panel. Escape leaves chat entry. Clicking a poker control leaves chat entry, so typing a wager does not send chat.
+9. **Poker reads** opens an optional developer overlay. Cycle NPCs to see frozen hand-start adaptations and their evidence, or select **Metrics / strategy** to inspect completed-hand counters. **New Match** preserves learning; strategy resets are deliberately CLI-only.
+
+### Adaptive poker intelligence
+
+Only authoritative public actions become evidence. Fifteen metrics track proper opportunities, not guessed hidden hand strength. Estimates combine a 12-opportunity prior with a rolling 50-hand recent model. Freya responds sooner; Ananya requires more evidence; Yuna waits longest. Up to three bounded adjustments affect the existing Rust strategy's pressure, value bets, bluffs, caution, traps and sizing. Base profiles never change. Reads freeze per hand and stop applying once the human folds or is eliminated.
+
+The model shares the existing local SQLite database and background worker, not social memory tables. No LLM, API key, network connection or conversation is required to learn. Legacy `--heads-up` practice still uses its original BasicNpc; the normal four-player game's elimination to heads-up retains adaptive personalities.
+
+See [Stage 7 design, precise metrics, simulations and verification](docs/stage7-verification.md) for opportunity definitions, limits and actual results.
+
+```sh
+# Close the game before inspecting/resetting persistent data:
+cargo run --example social -- inspect-strategy
+cargo run --example social -- reset-strategy --confirm
+cargo run --example social -- reset-memories all --confirm
+cargo run --example social -- reset-relationships all --confirm
+cargo run --example social -- reset-everything --confirm
+# A separate profile starts with no poker learning or social history:
+POKER_LAB_PROFILE=fresh_test cargo run
+```
+
+`reset-strategy` leaves social data untouched. `reset-memories` leaves relationships and learning untouched. `reset-everything` clears derived social/learned state but retains historical audit events; a fresh profile also separates that history.
 
 ### Conversation configuration
 
@@ -82,12 +107,25 @@ Mood changes gradually from public net poker results and conservatively recogniz
 ```sh
 # Deterministic, window-free conversation plumbing check; uses isolated temporary memory:
 cargo run --example social_probe
-# Eleven messages per NPC: original scenarios plus music, short-term recall and fatigue.
+# Thirteen messages per NPC: original scenarios plus music, recall and fatigue.
 # Fails on mock/fallback/missing replies; human review is still needed for quality:
 cargo run --example social_probe -- --require-model
 ```
 
 The mock is deliberately a test fixture, not a substitute language model. It cannot demonstrate nuanced acceptance/decline behavior or natural ordinary conversation. See [Stage 6 design, schema and verification](docs/stage6-verification.md) for what was tested and the remaining live-model checklist.
+
+If NPCs repeat canned replies, inspect their `[scripted]` / `[scripted fallback]` badges and Table Talk status first. Launching the game does **not** load a model. `lms status` and `lms ps` distinguish a running server from a loaded model. For the already-installed model used in local verification:
+
+```sh
+~/.lmstudio/bin/lms server start --port 1234 --bind 127.0.0.1
+~/.lmstudio/bin/lms load google/gemma-4-12b-qat --context-length 8192 --yes
+cargo run --example social_probe -- --require-model
+cargo run
+```
+
+This loads existing local files, not a download. No API key is needed. If another chat model is already loaded, keep it or select an explicit identifier; do not load several and expect `model: auto` to choose arbitrarily. After restarting LM Studio or an idle unload, check again. Only **Local model connected** plus unbadged NPC replies confirms validated real inference. Failure diagnostics distinguish unavailable/unloaded models, timeouts, token limits, invalid JSON, unsupported schema, request rejection, empty/overlong replies and worker failure. Stale replies are discarded, not converted to scripted speech. Logs contain fixed categories and HTTP status codes, not private prompts or credentials. The probe prints host-owned model/fallback counts and elapsed time.
+
+Stage 7 poker reads are optional background for unsolicited table talk. Direct player replies retain the Stage 6 context without strategic hints; valid direct model replies are not replaced by canned dialogue simply for matching a previous line. See [dialogue-regression investigation](docs/dialogue-regression.md) for evidence and live checks.
 
 ### Persistent memories and relationships
 
@@ -154,6 +192,9 @@ src/npc/
   mod.rs                 Strategy trait
   profiles.rs            Stable IDs, names, colors, personality parameters
   personality.rs         Shared probability-aware decision policy
+  opponent.rs            Public event reducer, opportunity counts, recent/long estimates
+  adaptation.rs          Bounded hand-start reads and explainable effective modifiers
+  opponent_tests.rs      Metric, persistence, privacy and adaptive simulation tests
   equity.rs              Unknown-card sampling, starting score, draw detection
   basic.rs               Original Stage 1 strategy
   simulation.rs          Window-free batch execution and statistics
@@ -168,9 +209,11 @@ src/ui/
   characters.rs          Cached portraits, persistent entities, animation/dialogue
   conversation.rs        Table Talk input, target selector, transcript/status, Bevy bridge
   memory.rs              Observation capture, session lifecycle, memory/profile overlay
+  learning.rs            In-memory learning, hand snapshots and debug overlay
 examples/social.rs       Headless social inspection and deliberate reset CLI
 examples/social_probe.rs Local/mock conversation acceptance-scenario runner
 examples/batch.rs         Personality batch CLI
+examples/adaptive.rs      Synthetic-human adaptive evaluation CLI
 examples/simulate.rs      Original heads-up simulation
 examples/ui_smoke.rs      Rendered interaction check and screenshots
 assets/characters/       Three expression atlases, asset contract and prompts
@@ -239,7 +282,7 @@ See [the character asset guide](assets/characters/README.md) for the seven-expre
 
 See [Stage 4 verification](docs/stage4-verification.md), [Stage 3 verification](docs/stage3-verification.md), and [Stage 2 verification](docs/stage2-verification.md). VPIP/PFR/showdown/pot-win are per dealt hand; aggression/fold are per decision. Chips/hand counts commitments after refunds, including blinds. “Pot win” includes any shared or side-pot award; net chips and match wins are also reported. Seats rotate between matches to reduce fixed-seat bias. A cap reports incomplete matches rather than treating them as wins.
 
-These are behavior diagnostics, not strength rankings. Uniform opponent ranges, small equity samples and a fixed heuristic policy are intentional limitations; there is no opponent learning or GTO solver. Other limits: fixed blinds, two/four-seat selectable configurations, generated portrait atlases, simple motion, instantaneous runouts, in-memory full replay history and no poker save/resume. Chat is short-text only, one visible recent-history panel, no streaming tokens, no model-driven bets and no moderation service. The mock dialogue is intentionally simple; natural conversation requires a suitable configured model. See [Stage 5 design and verification](docs/stage5-verification.md) for the persistence schema and restart/privacy checklist.
+These are behavior diagnostics, not strength rankings. Uniform opponent ranges, small equity samples and bounded heuristic adaptation are intentional limitations; there is no GTO solver or learned hand-range model. Other limits: fixed blinds, two/four-seat selectable configurations, generated portrait atlases, simple motion, instantaneous runouts, in-memory full replay history and no poker save/resume. Chat is short-text only, one scrollable recent-history panel, no streaming tokens, no model-driven bets and no moderation service. The mock dialogue is intentionally simple; natural conversation requires a suitable configured model. See [Stage 5 design and verification](docs/stage5-verification.md) for the social persistence schema and restart/privacy checklist, and [Stage 7](docs/stage7-verification.md) for current adaptive evaluation.
 
 ### Manual GUI checklist
 

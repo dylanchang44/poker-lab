@@ -41,10 +41,10 @@ fn initialization_migration_and_future_schema() {
     assert_eq!(r.schema_version().unwrap(), repository::SCHEMA_VERSION);
     drop(r);
     let sql = rusqlite::Connection::open(temp.db()).unwrap();
-    sql.execute_batch("ALTER TABLE memories DROP COLUMN audience; ALTER TABLE sessions DROP COLUMN statistics; PRAGMA user_version=2;").unwrap();
+    sql.execute_batch("ALTER TABLE memories DROP COLUMN audience; ALTER TABLE sessions DROP COLUMN statistics; DROP TABLE opponent_model; DROP TABLE opponent_commits; PRAGMA user_version=2;").unwrap();
     drop(sql);
     let r = Repository::open(Some(&temp.db())).unwrap();
-    assert_eq!(r.schema_version().unwrap(), 3);
+    assert_eq!(r.schema_version().unwrap(), repository::SCHEMA_VERSION);
     assert_eq!(r.snapshots().unwrap().len(), 3);
     drop(r);
     let sql = rusqlite::Connection::open(temp.db()).unwrap();

@@ -7,6 +7,9 @@ use rand_chacha::ChaCha8Rng;
 pub struct PersonalityStrategy {
     pub personality: Personality,
     pub samples: u32,
+    pub adaptation: super::adaptation::Adaptation,
+    /// Per-decision diagnostic only; never exported to opponents or dialogue.
+    pub last_bluff: bool,
     rng: ChaCha8Rng,
 }
 impl PersonalityStrategy {
@@ -14,17 +17,25 @@ impl PersonalityStrategy {
         Self {
             personality,
             samples: samples.clamp(16, 4096),
+            adaptation: Default::default(),
+            last_bluff: false,
             rng: ChaCha8Rng::seed_from_u64(seed),
         }
     }
 }
 impl Strategy for PersonalityStrategy {
     fn decide(&mut self, v: &Observation) -> Option<Action> {
+        self.last_bluff = false;
         if v.actor != Some(v.seat) {
             return None;
         }
         let hole = v.hole_cards?;
-        let p = self.personality;
+        let a = if super::adaptation::Adaptation::applies(v) {
+            self.adaptation.clone()
+        } else {
+            Default::default()
+        };
+        let p = a.effective(self.personality, v.phase);
         let i = v.seat.index();
         let legal = v.legal;
         let opponents = v.in_hand.iter().filter(|x| **x).count().saturating_sub(1);
@@ -58,11 +69,20 @@ impl Strategy for PersonalityStrategy {
         } else {
             f64::from(call) / contestable.max(1) as f64
         };
-        let margin = 0.10 - p.risk_tolerance * 0.10;
+        let margin = 0.10 - p.risk_tolerance * 0.10
+            + if v.phase == Phase::River
+                && v.history
+                    .last()
+                    .is_some_and(|h| h.seat == crate::poker::Seat::Human)
+            {
+                a.caution
+            } else {
+                0.0
+            };
         let draw = equity::draws(hole, &v.board);
         let has_draw = draw.flush || draw.straight;
         let share = 1.0 / (opponents + 1) as f64;
-        let value = equity > share + 0.20 - p.aggression * 0.10
+        let value = equity > share + 0.20 - p.aggression * 0.10 - a.value * 0.35
             && (v.phase != Phase::PreFlop || starting > selection + 5.0);
         let last_raiser = v.history.iter().rev().find(|h| {
             h.phase == Phase::PreFlop && matches!(h.action, Action::RaiseTo(_) | Action::BetTo(_))
@@ -78,6 +98,31 @@ impl Strategy for PersonalityStrategy {
             && opponents <= 2
             && equity > share * 0.75
             && self.rng.random::<f64>() < p.continuation;
+        let pre_pressure = a.preflop_pressure > 0.0
+            && v.phase == Phase::PreFlop
+            && starting >= selection + 3.0
+            && v.history
+                .iter()
+                .rev()
+                .find(|h| matches!(h.action, Action::RaiseTo(_) | Action::BetTo(_)))
+                .is_some_and(|h| h.seat == crate::poker::Seat::Human)
+            && self.rng.random::<f64>() < a.preflop_pressure;
+        let counter = a.flop_counter > 0.0
+            && v.phase == Phase::Flop
+            && call > 0
+            && equity > share + 0.13
+            && v.history
+                .last()
+                .is_some_and(|h| h.seat == crate::poker::Seat::Human)
+            && self.rng.random::<f64>() < a.flop_counter;
+        if a.trap > 0.0
+            && legal.check
+            && v.phase != Phase::PreFlop
+            && equity > 0.60
+            && self.rng.random::<f64>() < a.trap
+        {
+            return Some(Action::Check);
+        }
         let bluff = call == 0
             && opponents <= 2
             && (has_draw
@@ -87,8 +132,11 @@ impl Strategy for PersonalityStrategy {
                         .any(|c| c.rank == crate::poker::cards::Rank::Ace)))
             && self.rng.random::<f64>() < p.bluff_frequency;
         if let Some(range) = legal.wager {
-            let aggressive =
-                (value && self.rng.random::<f64>() < 0.30 + p.aggression * 0.65) || cbet || bluff;
+            let aggressive = (value && self.rng.random::<f64>() < 0.30 + p.aggression * 0.65)
+                || cbet
+                || bluff
+                || pre_pressure
+                || counter;
             let effective = v
                 .stacks
                 .iter()
@@ -98,8 +146,18 @@ impl Strategy for PersonalityStrategy {
                 .max()
                 .unwrap_or(0);
             let base = v.street_bets[i] + v.to_call;
-            let increment = (u64::from(v.pot.saturating_add(call)) * u64::from(p.bet_size_percent)
-                / 100) as u32;
+            let size = if !a.active.is_empty() {
+                super::adaptation::sizing_bucket(if value {
+                    p.bet_size_percent.saturating_add((a.value * 200.0) as u32)
+                } else if a.river_bluff > 0.0 && v.phase == Phase::River {
+                    50
+                } else {
+                    p.bet_size_percent
+                })
+            } else {
+                p.bet_size_percent
+            };
+            let increment = (u64::from(v.pot.saturating_add(call)) * u64::from(size) / 100) as u32;
             let to = base
                 .saturating_add(increment)
                 .min(effective)
@@ -109,6 +167,7 @@ impl Strategy for PersonalityStrategy {
             let safe_size = equity >= 0.70
                 || u64::from(paid) * 100 <= u64::from(v.stacks[i]) * if value { 65 } else { 20 };
             if aggressive && safe_size {
+                self.last_bluff = !value && (bluff || pre_pressure || cbet);
                 return Some(if range.is_raise {
                     Action::RaiseTo(to)
                 } else {

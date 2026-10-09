@@ -4,8 +4,9 @@ use crate::game::AppState;
 pub mod characters;
 mod controls;
 pub mod conversation;
+pub mod learning;
 pub mod memory;
-mod table;
+pub(crate) mod table;
 
 const BACKGROUND: Color = Color::srgb(0.035, 0.05, 0.08);
 const FELT: Color = Color::srgb(0.055, 0.27, 0.22);
@@ -27,6 +28,7 @@ impl Plugin for UiPlugin {
             .init_resource::<characters::PortraitAssets>()
             .init_resource::<characters::CharacterAnimation>()
             .init_resource::<memory::MemoryUi>()
+            .init_resource::<learning::LearningUi>()
             .init_resource::<conversation::ConversationUi>()
             .init_resource::<UiScale>()
             .add_message::<characters::DialogueRequest>()
@@ -36,7 +38,13 @@ impl Plugin for UiPlugin {
             .add_systems(OnEnter(AppState::InGame), crate::game::start_match)
             .add_systems(
                 OnExit(AppState::InGame),
-                (memory::finish, despawn_screen, crate::game::end_match).chain(),
+                (
+                    learning::update,
+                    memory::finish,
+                    despawn_screen,
+                    crate::game::end_match,
+                )
+                    .chain(),
             )
             .add_systems(Last, memory::shutdown)
             .add_systems(Update, button_interactions)
@@ -46,15 +54,25 @@ impl Plugin for UiPlugin {
             )
             .add_systems(PreUpdate, responsive_scale)
             .add_systems(
+                PostUpdate,
+                conversation::scroll_latest
+                    .after(bevy::ui::UiSystems::Layout)
+                    .run_if(in_state(AppState::InGame)),
+            )
+            .add_systems(
                 Update,
                 (
                     (
+                        learning::update,
                         controls::buttons,
                         memory::buttons,
+                        learning::buttons,
                         conversation::buttons,
                         controls::keyboard,
                         conversation::keyboard,
+                        learning::update,
                         crate::game::npc_turn,
+                        learning::update,
                         memory::capture,
                         conversation::update,
                         memory::capture_dialogue,
@@ -65,6 +83,7 @@ impl Plugin for UiPlugin {
                         table::render,
                         conversation::render,
                         memory::render,
+                        learning::render,
                         characters::sync_readouts,
                         characters::animate,
                         characters::dialogue,
@@ -80,7 +99,7 @@ impl Plugin for UiPlugin {
 fn responsive_scale(windows: Query<&Window>, mut scale: ResMut<UiScale>) {
     if let Ok(window) = windows.single() {
         let target = (window.width() / 1200.0)
-            .min(window.height() / 960.0)
+            .min(window.height() / 1160.0)
             .clamp(0.5, 2.0);
         if (scale.0 - target).abs() > 0.001 {
             scale.0 = target;

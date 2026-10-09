@@ -6,6 +6,31 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let path = database_path()?;
     let mut repository = Repository::open(Some(&path))?;
     match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+        ["inspect-strategy"] => {
+            let model = repository.opponent_model()?;
+            for npc in NpcId::ALL {
+                let read = poker_lab::npc::adaptation::Adaptation::for_player(npc, &model);
+                println!("{}", read.describe(npc, &model));
+            }
+        }
+        ["reset-strategy", "--confirm"] => {
+            repository.reset_opponent()?;
+            println!("Opponent learning reset; social data retained.");
+        }
+        ["reset-memories", target, "--confirm"] => {
+            let npc = if *target == "all" {
+                None
+            } else {
+                Some(NpcId::parse(target).ok_or("unknown NPC")?)
+            };
+            repository.reset_memories_only(npc)?;
+            println!("Memories reset; relationships and strategy retained.");
+        }
+        ["reset-everything", "--confirm"] => {
+            repository.reset(None, false)?;
+            repository.reset_opponent()?;
+            println!("All learned/social state reset. Historical audit remains; use POKER_LAB_PROFILE for a fresh profile.");
+        }
         [] | ["inspect"] => {
             println!("Database: {}", path.display());
             for character in repository.snapshots()? {
@@ -20,7 +45,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             repository.reset(npc, *command == "reset-relationships")?;
             println!("Reset {command} for {target}. Historical source events/session summaries remain; use a fresh profile for a completely separate history.");
         }
-        _ => return Err("Usage: cargo run --example social -- [inspect | reset NPC|all --confirm | reset-relationships NPC|all --confirm]. Close the game first.".into()),
+        _ => return Err("Usage: cargo run --example social -- [inspect | inspect-strategy | reset-strategy --confirm | reset-memories NPC|all --confirm | reset NPC|all --confirm | reset-relationships NPC|all --confirm | reset-everything --confirm]. Close the game first.".into()),
     }
     Ok(())
 }

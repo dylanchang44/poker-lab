@@ -27,9 +27,15 @@ pub(super) fn row(gap: f32) -> Node {
 #[derive(Component)]
 pub struct TableCanvas;
 #[derive(Component)]
+pub struct TableFelt;
+#[derive(Component)]
+pub struct HumanSeat;
+#[derive(Component)]
+pub struct ActionPanel;
+#[derive(Component)]
 pub(super) struct TableContent;
 
-pub fn render(
+pub(super) fn render(
     mut commands: Commands,
     mut session: ResMut<GameSession>,
     canvases: Query<Entity, With<TableCanvas>>,
@@ -60,8 +66,8 @@ pub fn render(
                         TableCanvas,
                         Node {
                             width: Val::Percent(100.0),
-                            max_width: Val::Px(1400.0),
-                            height: Val::Px(960.0),
+                            max_width: Val::Px(2000.0),
+                            height: Val::Px(1160.0),
                             flex_shrink: 0.0,
                             ..default()
                         },
@@ -69,12 +75,13 @@ pub fn render(
                     .with_children(|table| {
                         // Felt and character entities persist through hands and restarts.
                         table.spawn((
+                            TableFelt,
                             Node {
                                 position_type: PositionType::Absolute,
-                                left: Val::Percent(8.0),
+                                left: Val::Percent(3.0),
+                                right: Val::Percent(3.0),
                                 top: Val::Px(420.0),
-                                width: Val::Percent(84.0),
-                                height: Val::Px(238.0),
+                                height: Val::Px(410.0),
                                 border: UiRect::all(Val::Px(7.0)),
                                 border_radius: BorderRadius::all(Val::Percent(50.0)),
                                 ..default()
@@ -88,6 +95,7 @@ pub fn render(
                         super::characters::spawn_dialogue(table);
                         super::conversation::spawn(table);
                         super::memory::spawn(table);
+                        super::learning::spawn(table);
                     })
                     .id();
             });
@@ -135,58 +143,55 @@ pub fn render(
                 });
                 root.spawn(Node {
                     position_type: PositionType::Absolute,
-                    left: Val::Percent(50.0),
-                    margin: UiRect::left(Val::Px(-260.0)),
-                    top: Val::Px(455.0),
+                    left: Val::Percent(3.0),
+                    right: Val::Percent(3.0),
+                    justify_content: JustifyContent::Center,
+                    top: Val::Px(440.0),
                     ..default()
                 })
                 .with_children(|center| board(center, &view));
-                root.spawn(Node {
-                    position_type: PositionType::Absolute,
-                    left: Val::Percent(50.0),
-                    margin: UiRect::left(Val::Px(-350.0)),
-                    width: Val::Px(700.0),
-                    top: Val::Px(709.0),
-                    ..row(20.0)
-                })
+                root.spawn((
+                    HumanSeat,
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: Val::Percent(3.0),
+                        right: Val::Percent(3.0),
+                        top: Val::Px(750.0),
+                        ..row(20.0)
+                    },
+                ))
                 .with_children(|human| player(human, &view, Seat::Human));
-                root.spawn(Node {
-                    position_type: PositionType::Absolute,
-                    top: Val::Px(793.0),
-                    width: Val::Percent(100.0),
-                    ..row(0.0)
-                })
+                root.spawn((
+                    ActionPanel,
+                    Node {
+                        position_type: PositionType::Absolute,
+                        top: Val::Px(840.0),
+                        left: Val::Percent(62.0),
+                        right: Val::Px(12.0),
+                        height: Val::Px(308.0),
+                        padding: UiRect::all(Val::Px(12.0)),
+                        border_radius: BorderRadius::all(Val::Px(9.0)),
+                        ..column(12.0)
+                    },
+                    BackgroundColor(Color::srgb(0.055, 0.068, 0.09)),
+                ))
                 .with_children(|status_node| {
                     label(
                         status_node,
                         session.error.clone().unwrap_or_else(|| status(&view)),
-                        18.0,
+                        16.0,
                         GOLD,
                     );
-                });
-                root.spawn(Node {
-                    position_type: PositionType::Absolute,
-                    top: Val::Px(824.0),
-                    width: Val::Percent(100.0),
-                    ..row(0.0)
-                })
-                .with_children(|actions| controls(actions, &view, &session));
-                root.spawn(Node {
-                    position_type: PositionType::Absolute,
-                    top: Val::Px(942.0),
-                    width: Val::Percent(100.0),
-                    ..row(0.0)
-                })
-                .with_children(|footer| {
+                    controls(status_node, &view, &session);
                     label(
-                        footer,
+                        status_node,
                         session
                             .feedback
                             .iter()
                             .cloned()
                             .collect::<Vec<_>>()
                             .join("  /  "),
-                        11.0,
+                        12.0,
                         MUTED,
                     );
                 });
@@ -235,7 +240,7 @@ fn board(parent: &mut ChildSpawnerCommands, view: &Observation) {
                     label(
                         felt,
                         format!("{} {}: {awards}", pot_name(index), pot.pot.amount),
-                        13.0,
+                        12.0,
                         TEXT,
                     );
                 }
@@ -436,22 +441,93 @@ fn controls(parent: &mut ChildSpawnerCommands, view: &Observation, session: &Gam
         return;
     }
     parent.spawn(column(8.0)).with_children(|panel| {
-        if let Some(range)=view.legal.wager {
+        if let Some(range) = view.legal.wager {
             panel.spawn(row(8.0)).with_children(|row| {
-                label(row,format!("{} to  [{}-{}]",if range.is_raise {"Raise"} else {"Bet"},range.min_to,range.max_to),15.0,MUTED);
-                control(row,&format!("{}{}",session.bet_input,if session.editing {" |"} else {""}),Control::EditAmount,true,110.0);
-                for (name,action) in [("Min",Control::Minimum),("1/2",Control::HalfPot),("Pot",Control::Pot),("Max",Control::Maximum)] {control(row,name,action,true,70.0);}
+                label(
+                    row,
+                    format!("Total [{}–{}]", range.min_to, range.max_to),
+                    12.0,
+                    MUTED,
+                );
+                control(
+                    row,
+                    &format!(
+                        "{}{}",
+                        session.bet_input,
+                        if session.editing { " |" } else { "" }
+                    ),
+                    Control::EditAmount,
+                    true,
+                    82.0,
+                );
+                for (name, action) in [
+                    ("Min", Control::Minimum),
+                    ("1/2", Control::HalfPot),
+                    ("Pot", Control::Pot),
+                    ("Max", Control::Maximum),
+                ] {
+                    control(row, name, action, true, 46.0);
+                }
             });
-            label(panel,if session.editing {"Type chips; Backspace edits; Enter confirms amount; Escape resets. Then click Bet / Raise."} else {"Click the amount to type. This is your TOTAL bet on this street."},12.0,MUTED);
+            label(
+                panel,
+                if session.editing {
+                    "Enter confirms · Escape resets · Then Bet / Raise"
+                } else {
+                    "Click amount to edit the street total"
+                },
+                12.0,
+                MUTED,
+            );
         }
         panel.spawn(row(10.0)).with_children(|row| {
-            control(row,"Fold",Control::Act(Action::Fold),view.legal.fold,120.0);
-            if view.legal.check {control(row,"Check",Control::Act(Action::Check),true,140.0);}
-            else {control(row,&view.legal.call.map(|n|format!("Call {n}")).unwrap_or_else(||"Check / Call".into()),Control::Act(Action::Call),view.legal.call.is_some(),140.0);}
-            let wager=view.legal.wager;
-            let valid=wager.is_some_and(|r|session.bet_input.parse::<u32>().is_ok_and(|n|(r.min_to..=r.max_to).contains(&n)));
-            control(row,if wager.is_some_and(|r|r.is_raise) {"Raise"} else {"Bet"},Control::Wager,valid,120.0);
-            control(row,&format!("All-in {}",view.stacks[0]),Control::Act(Action::AllIn),view.legal.all_in,150.0);
+            control(
+                row,
+                "Fold",
+                Control::Act(Action::Fold),
+                view.legal.fold,
+                78.0,
+            );
+            if view.legal.check {
+                control(row, "Check", Control::Act(Action::Check), true, 96.0);
+            } else {
+                control(
+                    row,
+                    &view
+                        .legal
+                        .call
+                        .map(|n| format!("Call {n}"))
+                        .unwrap_or_else(|| "Check / Call".into()),
+                    Control::Act(Action::Call),
+                    view.legal.call.is_some(),
+                    96.0,
+                );
+            }
+            let wager = view.legal.wager;
+            let valid = wager.is_some_and(|r| {
+                session
+                    .bet_input
+                    .parse::<u32>()
+                    .is_ok_and(|n| (r.min_to..=r.max_to).contains(&n))
+            });
+            control(
+                row,
+                if wager.is_some_and(|r| r.is_raise) {
+                    "Raise"
+                } else {
+                    "Bet"
+                },
+                Control::Wager,
+                valid,
+                78.0,
+            );
+            control(
+                row,
+                &format!("All-in {}", view.stacks[0]),
+                Control::Act(Action::AllIn),
+                view.legal.all_in,
+                112.0,
+            );
         });
     });
 }
@@ -466,7 +542,8 @@ fn control(
     let mut entity = parent.spawn((
         Node {
             width: Val::Px(width),
-            height: Val::Px(40.0),
+            height: Val::Px(36.0),
+            flex_shrink: 0.0,
             justify_content: JustifyContent::Center,
             align_items: AlignItems::Center,
             border_radius: BorderRadius::all(Val::Px(7.0)),
@@ -482,5 +559,5 @@ fn control(
     if enabled {
         entity.insert((Button, control));
     }
-    entity.with_children(|parent| label(parent, text, 17.0, if enabled { TEXT } else { MUTED }));
+    entity.with_children(|parent| label(parent, text, 14.0, if enabled { TEXT } else { MUTED }));
 }

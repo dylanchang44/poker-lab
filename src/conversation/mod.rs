@@ -1,8 +1,10 @@
 //! A bounded, public-information conversation host; no Bevy or poker-rule mutations.
 mod config;
+mod diagnostics;
 mod provider;
 mod response;
 pub use config::{ConversationConfig, ProviderKind, ReasoningEffort};
+pub use diagnostics::{DialogueDiagnostics, DialogueIssue};
 pub use provider::{DialogueProvider, MockProvider, configured_provider};
 pub use response::{RelationshipSignal, SocialIntent, SocialResponse, Tone, parse_social_response};
 
@@ -128,6 +130,9 @@ pub struct ChatMessage {
 /// Whitelist only public fields. Never serialize Observation or GameEvent wholesale.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct PublicContext {
+    /// Rust-derived, confidence-gated public reads; never model-generated evidence.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub strategic_reads: Vec<String>,
     pub hand: u64,
     pub street: String,
     pub board: Vec<String>,
@@ -139,6 +144,7 @@ pub struct PublicContext {
 }
 pub fn public_context(view: &Observation, winners: &[String]) -> PublicContext {
     PublicContext {
+        strategic_reads: Vec::new(),
         hand: view.hand_number,
         street: view.phase.label().into(),
         board: view.board.iter().map(ToString::to_string).collect(),
@@ -301,6 +307,7 @@ pub enum ProviderStatus {
     Working,
     Fallback,
     Disabled,
+    Discarded,
 }
 
 /// One in-flight call and one priority human request; no response can modify poker.
@@ -320,7 +327,7 @@ pub struct ConversationManager {
     last_line: [String; 4],
     pub status: ProviderStatus,
     verified: bool,
-    failure_hint: &'static str,
+    diagnostics: DialogueDiagnostics,
     moods: [MoodState; 3],
 }
 impl ConversationManager {
@@ -348,11 +355,12 @@ impl ConversationManager {
             last_line: std::array::from_fn(|_| String::new()),
             status,
             verified: false,
-            failure_hint: "Scripted fallback: invalid reply",
+            diagnostics: DialogueDiagnostics::default(),
             moods: NpcId::ALL.map(MoodState::baseline),
         }
     }
     pub fn reset(&mut self, session: u64) {
+        let cancelled = self.pending.is_some() || self.queued.is_some();
         self.session = session;
         self.moods = NpcId::ALL.map(MoodState::baseline);
         self.history.clear();
@@ -365,7 +373,12 @@ impl ConversationManager {
         self.human_count = 0;
         self.last_line = std::array::from_fn(|_| String::new());
         self.verified = false;
-        self.failure_hint = "Scripted fallback: invalid reply";
+        self.diagnostics = DialogueDiagnostics::default();
+        if cancelled {
+            self.diagnostics.stale_responses = 1;
+            self.diagnostics.last_issue = Some(DialogueIssue::StaleResponse);
+            eprintln!("Dialogue: pending reply cancelled by match restart");
+        }
         self.status = if !self.config.enabled {
             ProviderStatus::Disabled
         } else if self.config.provider == ProviderKind::Mock {
@@ -429,9 +442,23 @@ impl ConversationManager {
             }
             ProviderStatus::Ready => "Remote model connected",
             ProviderStatus::Working => "Thinking...",
-            ProviderStatus::Fallback => self.failure_hint,
+            ProviderStatus::Fallback => self
+                .diagnostics
+                .last_issue
+                .unwrap_or(DialogueIssue::InvalidReply)
+                .label(),
+            ProviderStatus::Discarded => DialogueIssue::StaleResponse.label(),
             ProviderStatus::Disabled => "Dialogue off",
         }
+    }
+    pub fn diagnostics(&self) -> DialogueDiagnostics {
+        self.diagnostics
+    }
+    fn discarded(&mut self) {
+        self.diagnostics.stale_responses += 1;
+        self.diagnostics.last_issue = Some(DialogueIssue::StaleResponse);
+        self.status = ProviderStatus::Discarded;
+        eprintln!("Dialogue: {}", DialogueIssue::StaleResponse.label());
     }
     fn push(&mut self, line: ChatMessage) {
         self.observed_messages.push_back(line.clone());
@@ -651,26 +678,22 @@ impl ConversationManager {
         });
         // Only fixed diagnostic categories reach the UI. No raw provider bodies,
         // prompts, URLs, credentials or model reasoning are logged/displayed.
-        self.failure_hint = match parsed.as_ref().err().map(String::as_str) {
-            Some(e) if e.contains("timeout") || e.contains("timed out") => {
-                "Scripted fallback: timed out"
-            }
-            Some(e) if e.contains("no loaded") => "Scripted fallback: load a model",
-            Some(e) if e.contains("multiple loaded") => "Scripted fallback: select a model",
-            Some(e) if e.contains("token limit") => "Scripted fallback: token limit",
-            Some(e) if e.contains("network") => "Scripted fallback: server offline",
-            Some(e) if e.contains("HTTP status") => "Scripted fallback: API rejected request",
-            Some(_) => "Scripted fallback: invalid reply",
-            None => "Scripted fallback: repeated reply",
-        };
+        let failure = parsed
+            .as_ref()
+            .err()
+            .map(|e| DialogueIssue::classify(e))
+            .unwrap_or(DialogueIssue::RepeatedReply);
         let (text, expression, fallback, continuation) = match parsed {
             Ok(response)
                 if response.silent
+                    || request.player_text.is_some()
                     || response.dialogue
                         != self.last_line[request.speaker.seat().unwrap().index()] =>
             {
                 self.verified = self.config.provider != ProviderKind::Mock;
                 if response.silent {
+                    self.diagnostics.silent_replies += 1;
+                    self.diagnostics.last_issue = None;
                     self.status = if self.config.provider == ProviderKind::Mock {
                         ProviderStatus::Mock
                     } else {
@@ -697,10 +720,17 @@ impl ConversationManager {
         };
         let speaker = request.speaker;
         let source = if fallback {
+            self.diagnostics.fallbacks += 1;
+            self.diagnostics.last_issue = Some(failure);
+            eprintln!("Dialogue: {}", failure.label());
             DialogueSource::Fallback
         } else if self.config.provider == ProviderKind::Mock {
+            self.diagnostics.scripted_replies += 1;
+            self.diagnostics.last_issue = None;
             DialogueSource::Scripted
         } else {
+            self.diagnostics.model_replies += 1;
+            self.diagnostics.last_issue = None;
             DialogueSource::Model
         };
         self.last_line[speaker.seat().unwrap().index()] = text.clone();
@@ -746,6 +776,7 @@ impl ConversationManager {
                     if pending.request.session == self.session && pending.request.hand == hand {
                         return self.deliver(pending.request, result);
                     }
+                    self.discarded();
                 }
                 Err(mpsc::TryRecvError::Empty)
                     if pending.begun.elapsed()
@@ -753,19 +784,27 @@ impl ConversationManager {
                 {
                     self.pending = Some(pending)
                 }
-                Err(_) => {
+                Err(error) => {
                     if pending.request.session == self.session && pending.request.hand == hand {
-                        return self.deliver(pending.request, Err("provider timed out".into()));
+                        let reason = if matches!(error, mpsc::TryRecvError::Disconnected) {
+                            "worker unavailable"
+                        } else {
+                            "provider timed out"
+                        };
+                        return self.deliver(pending.request, Err(reason.into()));
                     }
+                    self.discarded();
                 }
             }
         }
         if self.pending.is_none()
             && !self.worker_busy.load(Ordering::Acquire)
             && let Some(request) = self.queued.take()
-            && request.session == self.session
-            && request.hand == hand
         {
+            if request.session != self.session || request.hand != hand {
+                self.discarded();
+                return None;
+            }
             let (sender, receiver) = mpsc::channel();
             let provider = Arc::clone(&self.provider);
             let worker_request = request.clone();

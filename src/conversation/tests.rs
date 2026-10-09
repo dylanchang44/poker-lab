@@ -38,6 +38,225 @@ fn private_history_is_excluded_from_other_npcs_and_public_speech() {
             .is_empty()
     );
 }
+
+#[test]
+fn dialogue_failure_categories_are_distinct_and_do_not_expose_details() {
+    for (error, expected) in [
+        (
+            "network or protocol error SECRET",
+            DialogueIssue::ModelUnavailable,
+        ),
+        ("no loaded chat model", DialogueIssue::ModelNotLoaded),
+        ("provider timeout", DialogueIssue::Timeout),
+        (
+            "provider output token limit reached",
+            DialogueIssue::OutputTokenLimit,
+        ),
+        ("Malformed", DialogueIssue::InvalidJson),
+        ("InvalidMetadata", DialogueIssue::UnsupportedSchema),
+        ("HTTP status 400 SECRET", DialogueIssue::RequestRejected),
+        (
+            "worker unavailable SECRET",
+            DialogueIssue::WorkerUnavailable,
+        ),
+        (
+            "provider returned no dialogue",
+            DialogueIssue::EmptyDialogue,
+        ),
+        ("TooLong", DialogueIssue::DialogueTooLong),
+    ] {
+        let mut manager = ConversationManager::new(
+            ConversationConfig::local_development(),
+            Arc::new(MockProvider),
+        );
+        let request = manager.request(
+            Speaker::Yuna,
+            InteractionType::Reply,
+            context(1),
+            Some("Hi".into()),
+        );
+        let line = manager.deliver(request, Err(error.into())).unwrap();
+        assert_eq!(manager.diagnostics().last_issue, Some(expected));
+        assert_eq!(manager.diagnostics().fallbacks, 1);
+        assert_eq!(manager.diagnostics().model_replies, 0);
+        assert_eq!(line.source, DialogueSource::Fallback);
+        assert!(!format!("{} {:?}", manager.label(), manager.diagnostics()).contains("SECRET"));
+    }
+}
+
+#[test]
+fn valid_repeated_direct_model_reply_is_not_replaced_with_canned_dialogue() {
+    let mut manager = ConversationManager::new(
+        ConversationConfig::local_development(),
+        Arc::new(MockProvider),
+    );
+    let request = manager.request(
+        Speaker::Yuna,
+        InteractionType::Reply,
+        context(1),
+        Some("Hello".into()),
+    );
+    for _ in 0..2 {
+        let line = manager
+            .deliver(
+                request.clone(),
+                Ok(r#"{"speaker":"yuna","dialogue":"Good morning."}"#.into()),
+            )
+            .unwrap();
+        assert_eq!(line.text, "Good morning.");
+        assert_eq!(line.source, DialogueSource::Model);
+    }
+    assert_eq!(manager.diagnostics().model_replies, 2);
+    assert_eq!(manager.diagnostics().fallbacks, 0);
+}
+
+#[test]
+fn strategic_reads_are_optional_and_never_crowd_direct_human_replies() {
+    let manager = manager();
+    let mut context = context(1);
+    context.strategic_reads = vec!["The player has often raised preflop.".into(); 4];
+    let direct = manager.request(
+        Speaker::Ananya,
+        InteractionType::Reply,
+        context.clone(),
+        Some("Do you like music?".into()),
+    );
+    let public = provider::dialogue_context(&direct);
+    assert!(public.strategic_reads.is_empty());
+    assert!(
+        !serde_json::to_string(&public)
+            .unwrap()
+            .contains("strategic_reads")
+    );
+    let unsolicited = manager.request(
+        Speaker::Ananya,
+        InteractionType::TableComment,
+        context,
+        None,
+    );
+    assert_eq!(
+        provider::dialogue_context(&unsolicited)
+            .strategic_reads
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn disconnected_worker_and_stale_response_are_not_misreported_as_timeouts() {
+    let mut manager = manager();
+    let request = manager.request(
+        Speaker::Ananya,
+        InteractionType::Reply,
+        context(1),
+        Some("Hi".into()),
+    );
+    let (sender, receiver) = mpsc::channel();
+    drop(sender);
+    manager.pending = Some(Pending {
+        receiver: Mutex::new(receiver),
+        request,
+        begun: Instant::now(),
+    });
+    let line = manager.tick(11, 1).unwrap();
+    assert_eq!(line.source, DialogueSource::Fallback);
+    assert_eq!(
+        manager.diagnostics().last_issue,
+        Some(DialogueIssue::WorkerUnavailable)
+    );
+    let request = manager.request(
+        Speaker::Ananya,
+        InteractionType::Reply,
+        context(1),
+        Some("Hi".into()),
+    );
+    let (sender, receiver) = mpsc::channel();
+    sender.send(MockProvider.respond(&request)).unwrap();
+    manager.pending = Some(Pending {
+        receiver: Mutex::new(receiver),
+        request,
+        begun: Instant::now(),
+    });
+    assert!(manager.tick(11, 2).is_none());
+    assert_eq!(
+        manager.diagnostics().last_issue,
+        Some(DialogueIssue::StaleResponse)
+    );
+    assert_eq!(manager.diagnostics().stale_responses, 1);
+    assert_eq!(manager.status, ProviderStatus::Discarded);
+}
+
+#[test]
+fn local_server_errors_retry_once_but_bad_requests_do_not() {
+    use std::io::{BufRead, Read, Write};
+    for codes in [vec![503, 200], vec![503, 503], vec![400]] {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let succeeds = codes.last() == Some(&200);
+        let server = std::thread::spawn(move || {
+            let mut previous = None;
+            for code in codes {
+                let until = Instant::now() + Duration::from_secs(5);
+                let mut stream = loop {
+                    if let Ok((stream, _)) = listener.accept() {
+                        break stream;
+                    }
+                    assert!(Instant::now() < until, "expected bounded retry request");
+                    std::thread::sleep(Duration::from_millis(2));
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut reader = std::io::BufReader::new(&mut stream);
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    assert!(reader.read_line(&mut line).unwrap() > 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(n) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = n.trim().parse::<usize>().unwrap();
+                    }
+                }
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).unwrap();
+                if let Some(old) = &previous {
+                    assert_eq!(&body, old);
+                }
+                previous = Some(body);
+                let response = if code == 200 {
+                    serde_json::json!({"choices":[{"finish_reason":"stop","message":{"content":"{\"speaker\":\"yuna\",\"dialogue\":\"I like jazz.\"}"}}]}).to_string()
+                } else {
+                    "{}".into()
+                };
+                write!(stream, "HTTP/1.1 {code} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).unwrap();
+            }
+        });
+        let config = ConversationConfig {
+            base_url: format!("http://{address}/v1"),
+            model: "fixture".into(),
+            ..ConversationConfig::local_development()
+        };
+        let host = manager();
+        let request = host.request(
+            Speaker::Yuna,
+            InteractionType::Reply,
+            context(1),
+            Some("Music?".into()),
+        );
+        let result = configured_provider(&config).respond(&request);
+        assert_eq!(result.is_ok(), succeeds);
+        if let Ok(raw) = result {
+            assert_eq!(
+                parse_response(&raw, Speaker::Yuna).unwrap().0,
+                "I like jazz."
+            );
+        }
+        server.join().unwrap();
+    }
+}
 fn await_line(manager: &mut ConversationManager, session: u64, hand: u64) -> DialogueLine {
     for _ in 0..100 {
         if let Some(line) = manager.tick(session, hand) {
@@ -359,6 +578,10 @@ fn restart_and_hand_change_discard_old_worker_result() {
     manager.human_message("Hello", Target::Freya, context.clone(), 0.0);
     assert!(manager.tick(5, context.hand).is_none());
     manager.reset(6);
+    assert_eq!(
+        manager.diagnostics().last_issue,
+        Some(DialogueIssue::StaleResponse)
+    );
     std::thread::sleep(Duration::from_millis(10));
     assert!(manager.tick(6, context.hand).is_none());
     assert!(manager.history().is_empty());

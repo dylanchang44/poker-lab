@@ -272,6 +272,16 @@ impl<const N: usize> Table<N> {
             Action::AllIn => self.street_bets[i] + self.stacks[i],
             _ => self.street_bets[i],
         };
+        let legal = self.legal_actions(seat);
+        self.events.push(GameEvent::DecisionOffered {
+            seat,
+            phase: self.phase,
+            pot: self.pot(),
+            to_call: self.current_bet.saturating_sub(self.street_bets[i]),
+            street_bet: self.street_bets[i],
+            can_raise: legal.wager.is_some()
+                || (legal.all_in && self.street_bets[i] + self.stacks[i] > self.current_bet),
+        });
         let paid = target - self.street_bets[i];
         self.pay(seat, paid);
         self.pending[i] = false;
