@@ -96,6 +96,7 @@ pub(super) fn render(
                         super::conversation::spawn(table);
                         super::memory::spawn(table);
                         super::learning::spawn(table);
+                        super::review::spawn(table);
                     })
                     .id();
             });

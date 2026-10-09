@@ -91,6 +91,7 @@ pub struct GameSession {
     opponent_observer: poker_lab::npc::opponent::Observer,
     pub completed_observations: VecDeque<(u64, poker_lab::npc::opponent::HandSample)>,
     pub reads: [poker_lab::npc::adaptation::Adaptation; 3],
+    pub reviews: poker_lab::review::ReviewHistory,
 }
 
 impl GameSession {
@@ -129,6 +130,7 @@ impl GameSession {
             opponent_observer: Default::default(),
             completed_observations: VecDeque::new(),
             reads: std::array::from_fn(|_| Default::default()),
+            reviews: Default::default(),
             presentation: PresentationState {
                 session: id,
                 ..Default::default()
@@ -181,6 +183,7 @@ impl GameSession {
             .enumerate()
         {
             let event_id = self.event_cursor + offset + 1;
+            self.reviews.observe(event);
             if let Some(sample) = self.opponent_observer.observe(event) {
                 self.completed_observations.push_back(sample);
             }

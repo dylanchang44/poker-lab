@@ -24,6 +24,8 @@ struct Progress {
     step: u32,
     expected_amount: String,
     chat_case: u8,
+    review_steps: usize,
+    review_revision: usize,
 }
 
 fn main() {
@@ -375,9 +377,81 @@ fn drive(world: &mut World) {
             click(world, "Close reads");
         }
         18 => {
-            click(world, "New Match");
+            click(world, "Hand Review");
         }
         19 => {
+            let panel = layout_rect::<ui::review::ReviewPanel>(world);
+            let text = layout_rect::<ui::review::ReviewText>(world);
+            assert!(text.min.cmpge(panel.min).all() && text.max.cmple(panel.max).all());
+            let session = world.resource::<game::GameSession>();
+            let last = session.reviews.hands().back().unwrap();
+            let count = last.frames.len();
+            let revision = session.engine.history().len();
+            let mut progress = world.resource_mut::<Progress>();
+            progress.review_steps = count;
+            progress.review_revision = revision;
+            capture(world, "review-start");
+        }
+        20 => {
+            assert_eq!(
+                world.resource::<game::GameSession>().engine.history().len(),
+                world.resource::<Progress>().review_revision
+            );
+            let mut progress = world.resource_mut::<Progress>();
+            progress.review_steps -= 1;
+            if progress.review_steps > 0 {
+                progress.next = progress.frame + 3;
+                click(world, "Next Action");
+                return;
+            }
+            let text = world
+                .query_filtered::<&Text, With<ui::review::ReviewText>>()
+                .single(world)
+                .unwrap();
+            assert!(text.0.contains("Total awarded:") && text.0.contains("Main pot"));
+            assert!(
+                world
+                    .query::<(&ui::review::ReviewControl, Option<&Button>)>()
+                    .iter(world)
+                    .any(|(c, b)| *c == ui::review::ReviewControl::NextStep && b.is_none())
+            );
+            capture(world, "review-result");
+        }
+        21 => {
+            click(world, "Previous Action");
+        }
+        22 => {
+            click(world, "Return to Table");
+        }
+        23 => {
+            click(world, "Statistics");
+        }
+        24 => {
+            let model = &world.resource::<ui::learning::LearningUi>().model;
+            let expected = poker_lab::statistics::report(model);
+            let text = world
+                .query_filtered::<&Text, With<ui::review::ReviewText>>()
+                .single(world)
+                .unwrap();
+            assert_eq!(text.0, expected);
+            let area = layout_rect::<ui::review::ReviewText>(world);
+            let info = world
+                .query_filtered::<&bevy::text::TextLayoutInfo, With<ui::review::ReviewText>>()
+                .single(world)
+                .unwrap();
+            assert!(
+                info.size.y * info.scale_factor <= area.height() + 2.0,
+                "statistics must fit"
+            );
+            capture(world, "statistics");
+        }
+        25 => {
+            click(world, "Return to Table");
+        }
+        26 => {
+            click(world, "New Match");
+        }
+        27 => {
             assert_eq!(
                 world
                     .resource::<game::GameSession>()
@@ -394,7 +468,7 @@ fn drive(world: &mut World) {
                 game::AppState::MainMenu
             );
             println!(
-                "Graphical smoke check passed: four seats, chat target/input/response, menu, pot sizing, raise, hand result, next hand, restart, menu return."
+                "Graphical smoke check passed: four seats, chat, betting, completed hand, review steps/awards/pause, statistics, next hand, restart, menu."
             );
             world.write_message(AppExit::Success);
         }

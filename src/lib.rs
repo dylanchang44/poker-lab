@@ -4,4 +4,6 @@ pub mod conversation;
 pub mod memory;
 pub mod npc;
 pub mod poker;
+pub mod review;
 pub mod social;
+pub mod statistics;

@@ -42,6 +42,7 @@ pub fn buttons(
     seed: Res<MatchSeed>,
     settings: Res<NpcSettings>,
     mut next: ResMut<NextState<AppState>>,
+    review: Res<super::review::ReviewUi>,
 ) {
     for (interaction, control, mut color) in &mut buttons {
         *color = match interaction {
@@ -49,7 +50,7 @@ pub fn buttons(
             Interaction::Hovered => BUTTON_HOVERED.into(),
             Interaction::Pressed => BUTTON_PRESSED.into(),
         };
-        if *interaction != Interaction::Pressed {
+        if *interaction != Interaction::Pressed || review.is_open() {
             continue;
         }
         chat.editing = false;

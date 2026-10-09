@@ -6,6 +6,7 @@ mod controls;
 pub mod conversation;
 pub mod learning;
 pub mod memory;
+pub mod review;
 pub(crate) mod table;
 
 const BACKGROUND: Color = Color::srgb(0.035, 0.05, 0.08);
@@ -29,6 +30,7 @@ impl Plugin for UiPlugin {
             .init_resource::<characters::CharacterAnimation>()
             .init_resource::<memory::MemoryUi>()
             .init_resource::<learning::LearningUi>()
+            .init_resource::<review::ReviewUi>()
             .init_resource::<conversation::ConversationUi>()
             .init_resource::<UiScale>()
             .add_message::<characters::DialogueRequest>()
@@ -47,7 +49,7 @@ impl Plugin for UiPlugin {
                     .chain(),
             )
             .add_systems(Last, memory::shutdown)
-            .add_systems(Update, button_interactions)
+            .add_systems(Update, (button_interactions, exit_button_interactions))
             .add_systems(
                 Update,
                 characters::menu_portraits.run_if(in_state(AppState::MainMenu)),
@@ -64,14 +66,16 @@ impl Plugin for UiPlugin {
                 (
                     (
                         learning::update,
+                        review::sync,
+                        review::buttons,
                         controls::buttons,
                         memory::buttons,
                         learning::buttons,
-                        conversation::buttons,
-                        controls::keyboard,
-                        conversation::keyboard,
+                        conversation::buttons.run_if(review::table_active),
+                        controls::keyboard.run_if(review::table_active),
+                        conversation::keyboard.run_if(review::table_active),
                         learning::update,
-                        crate::game::npc_turn,
+                        crate::game::npc_turn.run_if(review::table_active),
                         learning::update,
                         memory::capture,
                         conversation::update,
@@ -84,6 +88,7 @@ impl Plugin for UiPlugin {
                         conversation::render,
                         memory::render,
                         learning::render,
+                        review::render,
                         characters::sync_readouts,
                         characters::animate,
                         characters::dialogue,
@@ -146,7 +151,8 @@ fn spawn_main_menu(mut commands: Commands, mode: Res<crate::game::TableMode>) {
                 MUTED,
             );
             table(parent);
-            button(parent, "Start Game", AppState::InGame);
+            button(parent, "Start Game", NavigateTo(AppState::InGame));
+            button(parent, "Exit", ExitGame);
         });
 }
 
@@ -205,11 +211,11 @@ fn table(parent: &mut ChildSpawnerCommands) {
         });
 }
 
-fn button(parent: &mut ChildSpawnerCommands, text: &'static str, destination: AppState) {
+fn button(parent: &mut ChildSpawnerCommands, text: &'static str, action: impl Component) {
     parent
         .spawn((
             Button,
-            NavigateTo(destination),
+            action,
             Node {
                 width: Val::Px(205.0),
                 height: Val::Px(56.0),
@@ -222,6 +228,9 @@ fn button(parent: &mut ChildSpawnerCommands, text: &'static str, destination: Ap
         ))
         .with_children(|button| label(button, text, 22.0, TEXT));
 }
+
+#[derive(Component)]
+struct ExitGame;
 
 type NavigationButtons<'w, 's> = Query<
     'w,
@@ -242,6 +251,26 @@ fn button_interactions(
         *background = match interaction {
             Interaction::Pressed => {
                 next_state.set(destination.0);
+                BUTTON_PRESSED.into()
+            }
+            Interaction::Hovered => BUTTON_HOVERED.into(),
+            Interaction::None => BUTTON.into(),
+        };
+    }
+}
+
+type ExitButtons<'w, 's> = Query<
+    'w,
+    's,
+    (&'static Interaction, &'static mut BackgroundColor),
+    (Changed<Interaction>, With<ExitGame>),
+>;
+
+fn exit_button_interactions(mut buttons: ExitButtons, mut exits: MessageWriter<AppExit>) {
+    for (interaction, mut background) in &mut buttons {
+        *background = match interaction {
+            Interaction::Pressed => {
+                exits.write(AppExit::Success);
                 BUTTON_PRESSED.into()
             }
             Interaction::Hovered => BUTTON_HOVERED.into(),
@@ -307,6 +336,89 @@ mod tests {
             .0;
         *app.world_mut().get_mut::<Interaction>(entity).unwrap() = Interaction::Pressed;
         app.update();
+    }
+
+    #[test]
+    fn review_and_statistics_are_read_only_and_return_resumes_play() {
+        fn review_press(app: &mut App, control: review::ReviewControl) {
+            let entity = app
+                .world_mut()
+                .query::<(Entity, &review::ReviewControl, &Button)>()
+                .iter(app.world())
+                .find(|(_, c, _)| **c == control)
+                .unwrap()
+                .0;
+            *app.world_mut().get_mut::<Interaction>(entity).unwrap() = Interaction::Pressed;
+            app.update();
+            *app.world_mut().get_mut::<Interaction>(entity).unwrap() = Interaction::None;
+        }
+        let mut app = test_app();
+        review_press(&mut app, review::ReviewControl::Open);
+        assert!(
+            app.world_mut()
+                .query::<&Text>()
+                .iter(app.world())
+                .any(|t| t.0.contains("Complete a hand"))
+        );
+        review_press(&mut app, review::ReviewControl::Close);
+        app.world_mut()
+            .resource_mut::<GameSession>()
+            .submit(Seat::Human, Action::Fold);
+        app.update();
+        assert_eq!(
+            app.world().resource::<GameSession>().reviews.hands().len(),
+            1
+        );
+        app.world_mut().resource_mut::<GameSession>().next_hand();
+        review_press(&mut app, review::ReviewControl::Open);
+        let before = app
+            .world()
+            .resource::<GameSession>()
+            .engine
+            .history()
+            .to_vec();
+        let hands = app.world().resource::<learning::LearningUi>().model.hands;
+        review_press(&mut app, review::ReviewControl::NextStep);
+        for _ in 0..20 {
+            app.update();
+        }
+        assert_eq!(
+            app.world().resource::<GameSession>().engine.history(),
+            before
+        );
+        assert_eq!(
+            app.world().resource::<learning::LearningUi>().model.hands,
+            hands
+        );
+        press(&mut app, Control::Menu); // Even a synthetic click behind the modal is ignored.
+        app.update();
+        assert_eq!(
+            *app.world().resource::<State<AppState>>().get(),
+            AppState::InGame
+        );
+        review_press(&mut app, review::ReviewControl::Close);
+        review_press(&mut app, review::ReviewControl::Statistics);
+        let report =
+            poker_lab::statistics::report(&app.world().resource::<learning::LearningUi>().model);
+        assert!(
+            app.world_mut()
+                .query::<&Text>()
+                .iter(app.world())
+                .any(|t| t.0 == report)
+        );
+        review_press(&mut app, review::ReviewControl::Close);
+        for _ in 0..20 {
+            app.update();
+        }
+        assert!(app.world().resource::<GameSession>().engine.history().len() > before.len());
+        press(&mut app, Control::NewMatch);
+        assert!(
+            app.world()
+                .resource::<GameSession>()
+                .reviews
+                .hands()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -573,5 +685,32 @@ mod tests {
             assert_eq!(*app.world().resource::<State<AppState>>().get(), expected);
             app.world_mut().despawn(button);
         }
+    }
+
+    #[test]
+    fn exit_button_requests_clean_app_shutdown() {
+        #[derive(Resource, Default)]
+        struct ExitCount(usize);
+
+        fn count_exits(mut exits: MessageReader<AppExit>, mut count: ResMut<ExitCount>) {
+            count.0 += exits.read().count();
+        }
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_message::<AppExit>()
+            .init_resource::<ExitCount>()
+            .add_systems(Update, (exit_button_interactions, count_exits).chain());
+        app.world_mut().spawn((
+            Button,
+            ExitGame,
+            Interaction::Pressed,
+            BackgroundColor(BUTTON),
+        ));
+
+        app.update();
+        assert_eq!(app.world().resource::<ExitCount>().0, 1);
+        app.update();
+        assert_eq!(app.world().resource::<ExitCount>().0, 1);
     }
 }
